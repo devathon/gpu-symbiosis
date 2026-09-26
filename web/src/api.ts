@@ -109,12 +109,59 @@ export interface GpuSample {
   reservations: Record<string, number>;
 }
 
+export interface ScoreBreakdown {
+  score: number;
+  backlog_pressure?: number;
+  priority_pressure?: number;
+  waiting_pressure?: number;
+  arrival_rate?: number;
+  service_rate?: number;
+  demand_ratio?: number;
+  normalized_demand?: number;
+  recent_demand_pressure?: number;
+}
+
 export interface Decision {
   trigger?: string;
+  candidate_gateway_id?: string;
   candidate_application_id?: string;
+  candidate_score?: number;
+  switching_penalty?: number;
+  effective_score?: number;
+  current_score?: number;
   decision?: string;
   detail?: string;
-  at?: string;
+  at?: string | number;
+  active_application_id?: string;
+  scores?: ScoreBreakdown;
+  guards?: { min_residency_left?: number; cooldown_left?: number; emergency?: boolean };
+  residents?: string[];
+  vram?: {
+    total_mb: number;
+    reserve_mb: number;
+    usable_mb: number;
+    resident_mb: number;
+    reserved_mb: number;
+    external_mb: number;
+    free_mb: number;
+  };
+  switch_tracking?: {
+    switch_count: number;
+    last_switch_at: number | null;
+    last_pair: [string, string] | null;
+    previous_application: string | null;
+  };
+  boosts?: Record<string, number>;
+  config?: {
+    min_residency_sec: number;
+    switch_margin: number;
+    switch_cost_weight: number;
+    emergency_wait_sec: number | null;
+    emergency_queue_threshold: number | null;
+    switch_cooldown_sec: number;
+    process_now_multiplier: number;
+    process_now_boost_ttl_sec: number;
+  };
 }
 
 async function getJson<T>(url: string): Promise<T> {
@@ -141,4 +188,5 @@ export const api = {
   gwEnable: (id: string) => post(`/api/gateways/${id}/enable`),
   gwDisable: (id: string) => post(`/api/gateways/${id}/disable`),
   gwClear: (id: string) => post(`/api/gateways/${id}/clear-queue`),
+  gwProcessNow: (id: string) => post(`/api/gateways/${id}/process-now`),
 };

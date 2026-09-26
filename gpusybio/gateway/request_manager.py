@@ -25,6 +25,7 @@ from gpusybio.events.bus import (
 from gpusybio.events.bus import Event
 from gpusybio.events.log import get_logger
 from gpusybio.gateway.queue import GatewayQueue, RequestSlot
+from gpusybio.scoring import DemandTracker
 from gpusybio.state import StateManager
 
 log = get_logger("requestmanager")
@@ -51,6 +52,8 @@ class RequestManager:
         self._forward: dict[str, asyncio.Event] = {}
         self._active: dict[str, set[str]] = {}  # app_id -> in-flight request ids
         self._lock = asyncio.Lock()
+        # Demand tracking for the scheduler scoring model (spec 06 §6.3/§6.4).
+        self._demand = DemandTracker()
 
     # -- config --------------------------------------------------------------
     def gateway(self, gateway_id: str) -> dict:
@@ -67,6 +70,9 @@ class RequestManager:
 
     def queue(self) -> GatewayQueue:
         return self._queue
+
+    def demand(self) -> DemandTracker:
+        return self._demand
 
     # -- intake (spec 05 §3) --------------------------------------------------
     async def receive(self, gateway_id: str, metadata: dict | None = None) -> RequestSlot | None:
@@ -93,6 +99,7 @@ class RequestManager:
         self._states.ensure(gw["application_id"]).queued_requests = (
             self._queue.length(gateway_id)
         )
+        self._demand.arrival(gateway_id)  # spec 06 §6.3
 
         await self._persist(slot, status="QUEUED")
         await self._bus.publish_raw(
@@ -225,6 +232,8 @@ class RequestManager:
             if app_id:
                 self._states.request_finished(app_id)
         self._forward.pop(request_id, None)
+        if app_id and status == "COMPLETED":
+            self._demand.service(app_id)  # spec 06 §6.4 (service rate = completions/min)
         await self._update_status(request_id, status, completed_at=True, error=error)
         if app_id:
             self._states.ensure(app_id).queued_requests = self.queued_count(app_id)

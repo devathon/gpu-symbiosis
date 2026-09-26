@@ -29,7 +29,7 @@ works end-to-end: A1 loaded on a 24 GB GPU, request to A2's gateway queues, A1
 drains and unloads after its active request completes, A2 loads, the request
 streams back.
 
-## Phase 2 — Intelligent Scheduling
+## Phase 2 — Intelligent Scheduling  ✅ **DONE**
 
 Add:
 
@@ -47,6 +47,38 @@ switch margin
 Delivers the full gateway scoring model ([06 §6](06-scheduler.md#6-gateway-score))
 and anti-thrash controls ([06 §16](06-scheduler.md#16-thrashing-prevention)), plus
 the Scheduler Explainer UI.
+
+**Implementation notes:**
+
+- Scoring lives in `gpusybio/scoring.py` (pure module, unit-tested): gateway
+  score = `priority_pressure + waiting_pressure + recent_demand_pressure`
+  ([06 §6.9](06-scheduler.md)), backlog = max of queue/wait ratios with no
+  clamping (§6.1), demand ratio normalized by `d/(1+d)` (§6.6).
+- Demand tracking (spec 06 §6.3/§6.4) is a time-decayed EWMA (τ = 60 s) of
+  arrivals per gateway and completions per application, observed in the
+  RequestManager (arrival on `receive`, service on COMPLETED).
+- Decision order per [06 §14](06-scheduler.md#14-decision-order): zero-cost
+  resident path → concurrent load when it fits → eviction path. A busy
+  incumbent is **drained, not killed** (spec 06 §2): it is marked DRAINING and
+  the switch completes on request completion (§17). New requests to a draining
+  app queue instead of forwarding.
+- Guards: minimum residency (§12), switch margin (§13), emergency override
+  (§15 — overrides residency, never the drain), switch cooldown + full
+  switch bookkeeping (§16).
+- Process Now (§9) is a time-decaying priority boost (default 2×, TTL 120 s,
+  both configurable); it never kills active work.
+- The explainability payload (§19) is surfaced by
+  `GET /api/scheduler/current-decision` and the Scheduler Explainer UI
+  ([11 §5](11-web-ui.md#5-scheduler-explainer)): score breakdown, penalty,
+  effective vs current score, next-switch threshold, VRAM accounting,
+  residents, guard state, and switch history.
+
+**Decision — manual over-allocation (closed Phase 1 loose end):** admin
+`start`/`load` enforce the budget: if the app's required VRAM (incl. safety
+margin) does not fit alongside current residents, the transition is rejected
+with **409** + `{required_mb, free_mb, residents}`. Invariant 2
+([14](14-invariants.md)) therefore holds globally, not only on the automatic
+scheduler path; an already-resident app is never blocked (zero-cost pass).
 
 ## Phase 3 — Metrics
 

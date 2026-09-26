@@ -61,6 +61,11 @@ class AppConfig:
     consecutive_load_failures: int
     faulted_until: float | None
     process_name: str | None
+    # Measured timings (spec 11 §2.3: auto-calculated; feed switch cost, spec 06 §11).
+    startup_time_sec: float | None = None
+    load_time_sec: float | None = None
+    unload_time_sec: float | None = None
+    stop_time_sec: float | None = None
 
     @classmethod
     def from_row(cls, row: Application) -> "AppConfig":
@@ -90,6 +95,10 @@ class AppConfig:
             consecutive_load_failures=row.consecutive_load_failures,
             faulted_until=faulted_until,
             process_name=row.process_name,
+            startup_time_sec=row.startup_time_sec,
+            load_time_sec=row.load_time_sec,
+            unload_time_sec=row.unload_time_sec,
+            stop_time_sec=row.stop_time_sec,
         )
 
 

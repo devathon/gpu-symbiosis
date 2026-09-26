@@ -5,6 +5,7 @@ import GatewayCards from "./components/GatewayCards";
 import EventFeed from "./components/EventFeed";
 import RequestsTable from "./components/RequestsTable";
 import GpuChart from "./components/GpuChart";
+import SchedulerExplainer from "./components/SchedulerExplainer";
 
 const MAX_SAMPLES = 180;
 
@@ -167,19 +168,8 @@ export default function App() {
         <GatewayCards gws={gws} act={act} />
       </div>
 
-      <div className="mb-6 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
-        <div className="mb-1 text-xs uppercase tracking-wider text-zinc-500">Last scheduler decision</div>
-        <div className="font-mono text-sm">
-          {decision.decision ? (
-            <span>
-              <span className="text-sky-400">{decision.decision}</span>
-              {decision.candidate_application_id ? ` → ${decision.candidate_application_id}` : ""}
-              <span className="text-zinc-500"> · {decision.trigger} · {decision.detail}</span>
-            </span>
-          ) : (
-            <span className="text-zinc-600">no decision yet</span>
-          )}
-        </div>
+      <div className="mb-6">
+        <SchedulerExplainer d={decision} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">

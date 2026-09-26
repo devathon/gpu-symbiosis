@@ -150,4 +150,15 @@ async def _safe(handler: Subscriber, event: Event) -> None:
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001 - a broken subscriber must not break the bus
-        pass
+        # Log it: a silently-swallowed subscriber bug is otherwise invisible
+        # (the scheduler's decision simply never appears).
+        import traceback
+
+        from gpusybio.events.log import get_logger
+
+        get_logger().error(
+            "subscriber failed",
+            event_type=event.type,
+            handler=type(handler).__name__,
+            traceback=traceback.format_exc(),
+        )

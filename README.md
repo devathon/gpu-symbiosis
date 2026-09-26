@@ -121,3 +121,67 @@ Key Phase 1 behaviours (see the spec for details):
   ([05 §7](spec/05-gateway-module.md)).
 - **Structured event log** — every lifecycle/scheduler decision is logged and
   persisted; the dashboard streams it live over SSE.
+
+## Implementation — Phase 2 (done): Intelligent Scheduling
+
+Phase 2 implements the full gateway scoring model
+([06 §6](spec/06-scheduler.md#6-gateway-score)) and anti-thrash controls
+([06 §16](spec/06-scheduler.md#16-thrashing-prevention)), per
+[15 §Phase 2](spec/15-mvp-phases.md#phase-2--intelligent-scheduling--done).
+
+Every scheduler evaluation now scores each queued gateway:
+
+```
+gateway_score = priority_pressure + waiting_pressure + recent_demand_pressure
+```
+
+with EWMA arrival rate (per gateway) and service rate (per application,
+completed requests/min), the demand ratio normalized by `d / (1 + d)`
+([06 §6.6](spec/06-scheduler.md)), and a backlog that is the max of the queue
+and wait ratios — **allowed to exceed 1** so overdue requests stay urgent
+([06 §6.1](spec/06-scheduler.md)). The candidate is the argmax; the decision
+then follows the order in
+[06 §14](spec/06-scheduler.md#14-decision-order):
+
+1. **Zero-cost resident path** — candidate already resident → activate, no
+   switch, no cost.
+2. **Concurrent load** — candidate fits alongside residents → load + activate.
+3. **Eviction path** — a victim is selected (spec 06 §3); a *busy* victim is
+   **drained, not killed**: it is marked DRAINING and the switch completes only
+   after its active requests finish ([06 §17](spec/06-scheduler.md)).
+
+Guards and controls:
+
+- **Minimum residency** ([06 §12](spec/06-scheduler.md)) — a young resident
+  can't be evicted yet; the switch waits for the window to elapse.
+- **Switch margin** ([06 §13](spec/06-scheduler.md)) — the candidate's
+  effective score (score − switching cost) must exceed the incumbent's score
+  plus a margin before it switches.
+- **Emergency override** ([06 §15](spec/06-scheduler.md)) — a very old wait or
+  an oversized queue overrides minimum residency, but never the drain.
+- **Switch cooldown + bookkeeping** ([06 §16](spec/06-scheduler.md)) —
+  re-switching the same pair within the cooldown is suppressed; every switch is
+  counted and its pair/previous-application recorded.
+- **Process Now** ([06 §9](spec/06-scheduler.md)) — a time-decaying priority
+  boost for one gateway; it changes which request is picked next but never
+  kills in-flight work.
+
+The **Scheduler Explainer** panel (spec 11 §5) shows why the current decision
+was made: score breakdown, switching penalty, effective vs current score, the
+next-switch threshold, VRAM accounting, residents, guard state, and switch
+history — backed by `GET /api/scheduler/current-decision`.
+
+**Over-allocation is now rejected.** Admin `start`/`load` enforce Invariant 2
+(never exceed the VRAM budget): if an app's required VRAM (incl. safety
+margin) doesn't fit alongside the current residents, the transition returns
+**409** with `{required_mb, free_mb, residents}`. An already-resident app is
+never blocked (the zero-cost path adds no VRAM). This closes the Phase 1 loose
+end where a manual `start`/`load` could silently over-commit the GPU.
+
+### Tests
+
+```bash
+uv run pytest tests/test_scoring.py                 # scoring model + guards (unit)
+uv run pytest tests/test_e2e_core_loop.py           # core loop under the full model
+uv run pytest tests/test_scheduling_behavior.py     # residency / margin / emergency / boost / cooldown / 409
+```

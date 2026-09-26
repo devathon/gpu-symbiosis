@@ -32,6 +32,11 @@ Behaviour notes:
 - `start`/`stop`/`load`/`unload` are synchronous: they return 202 with a transition
   id; the state change is visible via `GET /api/applications/:id` (or a `watch`
   endpoint / SSE stream). Manual unload with active requests returns 202 in DRAINING.
+- `start`/`load` enforce the VRAM budget (Invariant 2, [14](14-invariants.md)):
+  if the app's required VRAM (incl. safety margin) does not fit alongside the
+  current residents, the transition is rejected with **409** and
+  `{required_mb, free_mb, residents}`. An already-resident app passes (the
+  zero-cost path needs no additional VRAM).
 
 ### Application Resource Shape
 

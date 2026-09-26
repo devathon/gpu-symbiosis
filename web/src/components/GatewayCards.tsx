@@ -27,6 +27,11 @@ export default function GatewayCards({
             </div>
             <div className="flex gap-1.5">
               {g.queue.length > 0 && <Btn label="Clear" onClick={() => act(() => api.gwClear(g.id))} />}
+              <Btn
+                label="Process Now"
+                onClick={() => act(() => api.gwProcessNow(g.id))}
+                title="Raise this gateway's scheduling priority (time-decayed boost; never kills active work)"
+              />
               {g.enabled ? (
                 <Btn label="Disable" onClick={() => act(() => api.gwDisable(g.id))} />
               ) : (

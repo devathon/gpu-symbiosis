@@ -31,9 +31,18 @@ export function badge(state: string) {
   );
 }
 
-export const Btn = ({ label, onClick }: { label: string; onClick: () => void }) => (
+export const Btn = ({
+  label,
+  onClick,
+  title,
+}: {
+  label: string;
+  onClick: () => void;
+  title?: string;
+}) => (
   <button
     onClick={onClick}
+    title={title}
     className="rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs hover:bg-zinc-700"
   >
     {label}

@@ -216,6 +216,32 @@ def make_admin_api(
         s = states.get(app_id)
         if s.transition is not None:
             raise HTTPException(409, f"transition '{s.transition}' in flight")
+        if op in ("start", "load"):
+            # Invariant 2 (spec 14): never exceed the VRAM budget — enforced for
+            # manual actions too. An already-resident app passes (zero-cost path,
+            # spec 06 §7); otherwise the required VRAM (incl. safety margin) must
+            # fit alongside current residents (spec 07 §3).
+            from gpusybio.applications.lifecycle import ProcessState, ResidencyState
+
+            cfg = apps.config(app_id)
+            required = resources.required_for(cfg.configured_gpu_memory_mb, cfg.safety_margin)
+            already_resident = (
+                s.process is ProcessState.RUNNING and s.residency is ResidencyState.LOADED
+            )
+            if not resources.fits(app_id, required, already_resident=already_resident):
+                raise HTTPException(
+                    409,
+                    {
+                        "detail": (
+                            f"insufficient VRAM for {app_id}: would exceed the budget "
+                            f"(Invariant 2). Required {required:.0f} MB "
+                            f"(incl. safety margin), free {resources.available_mb():.0f} MB."
+                        ),
+                        "required_mb": round(required, 1),
+                        "free_mb": round(resources.available_mb(), 1),
+                        "residents": scheduler.residents(),
+                    },
+                )
         if op == "start":
             result = await apps.start(app_id)
             return {"id": app_id, "transition": "start"}
@@ -409,7 +435,24 @@ def make_admin_api(
 
     @api.get("/api/scheduler/current-decision")
     def current_decision():
-        return scheduler.last_decision or {}
+        d = dict(scheduler.last_decision or {})
+        d.setdefault("decision", "no_candidate")
+        sc = scheduler.settings().scheduler
+        d.setdefault("config", {
+            "min_residency_sec": sc.min_residency_sec,
+            "switch_margin": sc.switch_margin,
+            "switch_cost_weight": sc.switch_cost_weight,
+            "emergency_wait_sec": sc.emergency_wait_sec,
+            "emergency_queue_threshold": sc.emergency_queue_threshold,
+            "switch_cooldown_sec": sc.switch_cooldown_sec,
+            "process_now_multiplier": sc.process_now_multiplier,
+            "process_now_boost_ttl_sec": sc.process_now_boost_ttl_sec,
+        })
+        d.setdefault("residents", scheduler.residents())
+        d.setdefault("switch_tracking", scheduler.switch_tracking())
+        d.setdefault("boosts", scheduler.boosts())
+        d.setdefault("vram", scheduler._vram_accounting())
+        return d
 
     # -- SSE (spec 11 §1) ----------------------------------------------------------
     @api.get("/api/events/sse")

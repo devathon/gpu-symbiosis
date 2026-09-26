@@ -130,13 +130,17 @@ class ResourceManager:
         margin = self._safety_margin if safety_margin is None else safety_margin
         return configured_mb * (1.0 + margin)
 
-    def fits(self, app_id: str, required_mb: float) -> bool:
+    def fits(self, app_id: str, required_mb: float, already_resident: bool = False) -> bool:
         """Candidate fits alongside current residents/reservations.
 
         A candidate that is already resident needs no additional VRAM
-        (zero-cost path, spec 06 §7).
+        (zero-cost path, spec 06 §7). Residency is passed in explicitly by the
+        caller — it is NOT inferred from live memory: a running-but-unloaded
+        app still holds a live baseline (spec 07 §5), and treating that as
+        "resident" would let it load concurrently on top of other residents
+        (Invariant 2 violation).
         """
-        if app_id in self._reservations or self._live.get(app_id, 0.0) > 0:
+        if already_resident:
             return True  # already resident — nothing to add
         return required_mb <= self.available_mb()
 

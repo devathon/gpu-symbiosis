@@ -93,6 +93,10 @@ class SchedulerSpec(BaseModel):
     emergency_wait_sec: float = 300.0
     emergency_queue_threshold: int | None = None
     switch_cooldown_sec: float = 0.0
+    # Process Now (spec 06 §9): time-decaying priority boost until the
+    # gateway's queue drains.
+    process_now_multiplier: float = Field(default=2.0, ge=1.0)
+    process_now_boost_ttl_sec: float = Field(default=120.0, ge=1.0)
 
 
 class MetricsSpec(BaseModel):

@@ -21,6 +21,8 @@ SETTING_KEYS = {
     "scheduler.emergency_wait_sec": lambda c: c.settings.scheduler.emergency_wait_sec,
     "scheduler.emergency_queue_threshold": lambda c: c.settings.scheduler.emergency_queue_threshold,
     "scheduler.switch_cooldown_sec": lambda c: c.settings.scheduler.switch_cooldown_sec,
+    "scheduler.process_now_multiplier": lambda c: c.settings.scheduler.process_now_multiplier,
+    "scheduler.process_now_boost_ttl_sec": lambda c: c.settings.scheduler.process_now_boost_ttl_sec,
     "metrics.interval_sec": lambda c: c.settings.metrics.interval_sec,
     "queue.default_max_waiting_requests": lambda c: c.settings.queue.default_max_waiting_requests,
     "queue.default_max_waiting_time_sec": lambda c: c.settings.queue.default_max_waiting_time_sec,
