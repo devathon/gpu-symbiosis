@@ -1,0 +1,30 @@
+[project]
+name = "gpu-symbiosis-spikes"
+version = "0.1.0"
+description = "Phase 1 mandatory tech-stack spikes (spec 16 section 4)"
+requires-python = ">=3.13"
+dependencies = [
+    "uvicorn[standard]>=0.30",
+    "starlette>=0.37",
+    "aiohttp>=3.9",
+    "fastapi>=0.110",
+    "httpx>=0.27",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.uv]
+package = false  # spikes are run in-place, not installed
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

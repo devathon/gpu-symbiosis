@@ -1,0 +1,308 @@
+# Module 11 — Web UI
+
+The Web UI is the configuration and monitoring surface. It is effectively
+**administrative access to the machine** (it can start/stop processes and execute
+scripts), so it requires admin authentication — see [12 §3](12-security.md#3-web-ui-security).
+
+Views:
+
+```text
+Dashboard (default)
+Applications
+Gateways
+Scheduler
+Events
+Settings
+```
+
+## 1. Dashboard
+
+```text
+GPU
+─────────────────────────────────
+
+VRAM
+████████████████░░░░ 18.4 / 24 GB
+
+GPU
+████████████░░░░░░░░ 61%
+
+Temperature
+67°C
+
+Power
+112 W
+```
+
+Then:
+
+```text
+ACTIVE APPLICATIONS
+
+Qwen 3.8     LOADED     18.1 GB
+ComfyUI      IDLE        6.2 GB
+```
+
+And:
+
+```text
+QUEUES
+
+Qwen 3.5
+████████░░ 8 / 10
+Oldest: 42 sec
+
+TTS
+██░░░░░░░░ 2 / 20
+Oldest: 8 sec
+```
+
+The dashboard updates live (SSE or 1 s polling) and always reflects the same state
+the scheduler sees.
+
+## 2. Application Management UI
+
+### 2.1 Application List
+
+Columns:
+
+```text
+Name
+Type
+Process
+Status
+
+GPU Usage
+GPU Memory
+CPU Usage
+CPU Memory
+
+Active Time
+
+Startup
+Load
+Unload
+Stop
+
+Actions
+```
+
+Card example:
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ Qwen 3.8 │ llama │ LOADED                                  │
+│ GPU ████████████░░ 72%                                      │
+│ VRAM ███████████████░ 18.1 / 24 GB                         │
+│ CPU ███░░░░░░░ 18%                                          │
+│ RAM █████░░░░░ 8.2 GB                                       │
+│                                                              │
+│ Active: 2h 31m                                               │
+│ Start: 7.2s   Load: 3.8s   Unload: 2.1s                    │
+│                                                              │
+│ [Unload] [Stop] [Edit]                                      │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Action availability depends on state (e.g. `[Stop]` when RUNNING, `[Load]` when
+RUNNING/OFF, `[Unload]` when LOADED, `[Force Stop]` only after confirmation).
+
+### 2.2 Status Indicator
+
+```text
+OFF
+STARTING
+LOADING
+LOADED
+PROCESSING
+IDLE
+DRAINING
+UNLOADING
+STOPPING
+ERROR
+```
+
+(Projection of the separate process + residency states, see
+[04 §3](04-application-manager.md#3-combined-ui-state).)
+
+### 2.3 Add / Edit Application
+
+**General**
+
+```text
+Name
+Description
+Enabled
+Application Type
+```
+
+**Process**
+
+```text
+Process Name
+Start Script
+Stop Script
+```
+
+**Loading**
+
+```text
+Load Script
+Unload Script
+Allow Automatic Unload
+Idle Unload Timeout
+```
+
+**Network**
+
+```text
+Port
+Protocol
+Health Check
+```
+
+**Resource**
+
+```text
+GPU Memory
+GPU Usage
+CPU Memory
+GPU Memory Safety Margin
+```
+
+**Timing**
+
+```text
+Startup Time
+Load Time
+Unload Time
+Stop Time
+```
+
+Timing fields are **read-only** and automatically calculated.
+
+## 3. Gateway Management UI
+
+Columns:
+
+```text
+Gateway
+Port
+Application
+Status
+
+Queue
+Waiting Time
+
+Priority
+
+Enabled
+
+Actions
+```
+
+Example:
+
+```text
+Qwen 3.8 API
+:913000
+Qwen 3.8
+PROCESSING
+
+Queue:
+███░░░░░ 3 / 10
+
+Waiting:
+████░░░░ 18 / 60 sec
+
+[Process Now] [Disable] [Edit]
+```
+
+### 3.1 Gateway States
+
+```text
+DISABLED
+IDLE
+WAITING
+PROCESSING
+DRAINING
+LOADING
+ERROR
+```
+
+### 3.2 Gateway Actions
+
+| Action | Behaviour |
+| --- | --- |
+| **Enable** | Start accepting requests |
+| **Disable** | Stop accepting new requests; existing continue |
+| **Process Now** | Raises scheduling priority (time-decayed boost, never kills active work) |
+| **Clear Queue** | Cancels queued requests; never cancels active requests |
+| **Edit** | Modify gateway configuration |
+| **Delete** | Only when queue empty and `active_requests = 0`, or with explicit forced deletion |
+
+## 4. Queued Request Inspector
+
+For each gateway queue: list of queued requests with `request_id`,
+`received_at`, `queued_at`, wait time, priority, client metadata. Actions:
+cancel (queued only), force-process (raises to top of queue).
+
+## 5. Scheduler Explainer
+
+A particularly useful section — makes the scheduler explainable:
+
+```text
+CURRENT DECISION
+
+Active:
+Qwen 3.8
+
+Candidate:
+Qwen 3.5
+
+Gateway Score:
+42.7
+
+Switching Penalty:
+8.4
+
+Effective Score:
+34.3
+
+Current Score:
+27.1
+
+Decision:
+KEEP QWEN 3.8
+```
+
+Backed by `GET /api/scheduler/current-decision` and the scheduler_events stream
+([06 §19](06-scheduler.md#19-explainability)). Also shows: current residents, VRAM
+accounting (total/reserve/resident/reserved/external/free), and the next switch
+threshold.
+
+## 6. Event Log
+
+```text
+18:04:12  Request received → Qwen 3.5
+18:04:12  Qwen 3.5 queued
+18:04:13  Scheduler candidate = Qwen 3.5
+18:04:13  Qwen 3.8 active request = 1
+18:04:13  Waiting for Qwen 3.8
+18:04:27  Qwen 3.8 request complete
+18:04:27  Qwen 3.8 draining
+18:04:28  Qwen 3.8 unloading
+18:04:31  Qwen 3.8 unloaded
+18:04:31  Qwen 3.5 loading
+18:04:36  Qwen 3.5 ready
+18:04:36  Request forwarded
+```
+
+Filterable by type (request / lifecycle / scheduler / error) and by application or
+gateway; live-tail mode; full detail (JSON) on click.
+
+## 7. Settings UI
+
+Edits all global configuration keys from [10 §6](10-api.md#6-global-configuration)
+with validation (e.g. reserve < total VRAM, margins ≥ 0) and a change audit trail
+in events.

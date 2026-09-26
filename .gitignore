@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+
+# Web
+web/node_modules/
+web/.npm-cache/
+web/dist/
+web/tsconfig.tsbuildinfo
+
+# Runtime / logs
+.run.log
+
+# Scratch / captures
+.c0.txt
+cap*.png
+cap*.jpg
+cap_b64.txt
+chart_capture.png
+new_chart_capture.png

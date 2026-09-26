@@ -1,0 +1,65 @@
+# GPUSymbiosis seed configuration (spec 10 §6).
+# Dev config: two mock GPU apps on a fake 24 GB GPU — runs without any real GPU.
+# For a real deployment, set gpu.backend to "nvml" and point the application
+# scripts at your real inference servers (llama-server, ollama, ComfyUI, ...).
+
+db_path: /tmp/gpusybio-dev.db
+admin_host: 127.0.0.1
+admin_port: 9530
+
+settings:
+  gpu:
+    backend: fake          # "fake" (no GPU needed) | "nvml" (real GPU)
+    fake_total_mb: 24576
+    memory_reserve_mb: 2048
+    memory_safety_margin: 0.10
+  log_level: INFO
+
+applications:
+  - id: a1
+    name: qwen38
+    application_type: llama
+    port: 9501
+    # Mock app (tests/mock_gpu_app.py). For a real server, replace with e.g.:
+    #   start_script: "nohup llama-server -m qwen38.gguf --port 9501 >/tmp/a1.log 2>&1 & echo $! >/tmp/a1.pid"
+    #   stop_script:  "kill $(cat /tmp/a1.pid) 2>/dev/null; sleep 0.5; true"
+    start_script: >
+      nohup python tests/mock_gpu_app.py --port 9501 --name qwen38 --start-loaded
+      >/tmp/gpusybio-a1.log 2>&1 & echo $! >/tmp/gpusybio-a1.pid; sleep 0.2; echo $(cat /tmp/gpusybio-a1.pid)
+    stop_script: "kill $(cat /tmp/gpusybio-a1.pid) 2>/dev/null; sleep 0.3; true"
+    load_script: "curl -s -X POST http://127.0.0.1:9501/load"
+    unload_script: "curl -s -X POST http://127.0.0.1:9501/unload"
+    health_check_url: http://127.0.0.1:9501/health
+    ready_check_url: http://127.0.0.1:9501/ready
+    gpu_memory_mb: 18432
+    max_concurrent_requests: 1
+
+  - id: a2
+    name: llama31
+    application_type: llama
+    port: 9502
+    start_script: >
+      nohup python tests/mock_gpu_app.py --port 9502 --name llama31 --start-loaded
+      >/tmp/gpusybio-a2.log 2>&1 & echo $! >/tmp/gpusybio-a2.pid; sleep 0.2; echo $(cat /tmp/gpusybio-a2.pid)
+    stop_script: "kill $(cat /tmp/gpusybio-a2.pid) 2>/dev/null; sleep 0.3; true"
+    load_script: "curl -s -X POST http://127.0.0.1:9502/load"
+    unload_script: "curl -s -X POST http://127.0.0.1:9502/unload"
+    health_check_url: http://127.0.0.1:9502/health
+    ready_check_url: http://127.0.0.1:9502/ready
+    gpu_memory_mb: 12288
+    max_concurrent_requests: 1
+
+gateways:
+  - id: gw-a1
+    name: gw-a1
+    port: 9511
+    application_id: a1
+    priority: 10
+    max_concurrent_requests: 1
+
+  - id: gw-a2
+    name: gw-a2
+    port: 9512
+    application_id: a2
+    priority: 5
+    max_concurrent_requests: 1
