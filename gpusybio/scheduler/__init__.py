@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import types
 from dataclasses import dataclass
 
 from gpusybio.applications.lifecycle import ProcessState, ResidencyState
@@ -98,6 +99,9 @@ class Scheduler:
         self._tracking = SwitchTracking()
         # Process Now boosts: gateway_id → expiry timestamp (spec 06 §9).
         self._boosts: dict[str, float] = {}
+        # What-if mode (spec 15 §Phase 5): evaluate the scoring model without
+        # acting (no forwards/loads/switches/boosts, no decision bookkeeping).
+        self._dry_run: bool = False
 
     def start(self) -> None:
         self._bus.subscribe(TRIGGERS, self._on_trigger)
@@ -116,6 +120,28 @@ class Scheduler:
                     await t
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
+
+    # -- what-if simulation (spec 15 §Phase 5) ----------------------------------
+    async def simulate(self, trigger: str = RECONCILE) -> dict:
+        """Evaluate the scoring model against current state WITHOUT acting.
+
+        Runs the same decision logic as a live trigger, but with the dry-run
+        flag set: no forwards, loads, switches, boosts or decision bookkeeping
+        are applied (spec 15: "what-if mode ... without acting"). Returns the
+        decision that would have been made, tagged ``simulated``.
+
+        Note: ``_evaluate`` acquires the scheduler lock itself (Invariant 4);
+        ``asyncio.Lock`` is non-reentrant, so this must NOT hold it here.
+        """
+        self._dry_run = True
+        try:
+            rec = await self._evaluate(Event(type=trigger))
+        finally:
+            self._dry_run = False
+        if rec is None:
+            rec = {}
+        rec["simulated"] = True
+        return rec
 
     # -- accessors (API / UI) ---------------------------------------------------
     def settings(self):
@@ -235,17 +261,19 @@ class Scheduler:
             # drained) so a boost set by this very PROCESS_NOW trigger is not
             # immediately expired in the same evaluation.
             now = time.time()
-            for gid in list(self._boosts):
-                if now >= self._boosts[gid] or self._rm.queue().length(gid) == 0:
-                    self._boosts.pop(gid, None)
+            if not self._dry_run:
+                for gid in list(self._boosts):
+                    if now >= self._boosts[gid] or self._rm.queue().length(gid) == 0:
+                        self._boosts.pop(gid, None)
 
-            # Process Now (spec 06 §9): time-decaying priority boost.
-            if trigger == PROCESS_NOW:
-                gid = ev.data.get("gateway_id")
-                if gid in self._rm.gateway_configs():
-                    self._boosts[gid] = (
-                        time.time() + float(self._settings.scheduler.process_now_boost_ttl_sec)
-                    )
+                # Process Now (spec 06 §9): time-decaying priority boost.
+                if trigger == PROCESS_NOW:
+                    gid = ev.data.get("gateway_id")
+                    if gid in self._rm.gateway_configs():
+                        self._boosts[gid] = (
+                            time.time()
+                            + float(self._settings.scheduler.process_now_boost_ttl_sec)
+                        )
 
             # Resident-first (spec 06 §7 zero-cost path): a resident app with a
             # free slot and its own queued requests serves them at zero cost
@@ -382,8 +410,9 @@ class Scheduler:
             elif vs.active_requests > 0:
                 # spec 06 §2/§14: mark DRAINING; new requests queue, existing continue.
                 # The switch completes on request completion (spec 06 §17).
-                self._states.set_draining(victim.id, True)
-                await self._emit("DRAIN_START", application_id=victim.id)
+                if not self._dry_run:
+                    self._states.set_draining(victim.id, True)
+                    await self._emit("DRAIN_START", application_id=victim.id)
                 return await self._decide(
                     trigger, cand, None, "drain", csc["score"], 0.0, cur_sc,
                     detail=f"{victim.id} draining ({vs.active_requests} active)",
@@ -403,11 +432,12 @@ class Scheduler:
                         detail=f"switch to {app_id} not ready yet (retried on next event)",
                         scores=csc, active=victim.id, guards=guards,
                     )
-                t = self._tracking
-                t.switch_count += 1
-                t.last_switch_time = time.time()
-                t.last_pair = (victim.id, app_id)
-                t.previous_application = victim.id
+                if not self._dry_run:
+                    t = self._tracking
+                    t.switch_count += 1
+                    t.last_switch_time = time.time()
+                    t.last_pair = (victim.id, app_id)
+                    t.previous_application = victim.id
                 return await self._decide(
                     trigger, cand, None, "switch", csc["score"], penalty, cur_sc,
                     detail=f"switched {victim.id} → {app_id} (cost {cost:.2f}s)",
@@ -492,6 +522,8 @@ class Scheduler:
 
     def _clear_draining(self) -> None:
         """A drain only exists to serve a candidate; no candidate → release it."""
+        if self._dry_run:
+            return
         for app_id in self._app_ids:
             s = self._states.get(app_id)
             if s.draining and self._rm.queued_count(app_id) == 0:
@@ -510,12 +542,21 @@ class Scheduler:
             (s for s in self._rm.queue().all_slots() if s.application_id == app_id),
             key=lambda s: (-s.priority, s.queued_at),
         )
+        count = min(len(slots), limit)
+        if self._dry_run:
+            return count  # what-if: report how many would be forwarded, don't signal
         for slot in slots[:limit]:
             self._rm.signal_forward(slot.request_id)
-        return min(len(slots), limit)
+        return count
 
     async def _ensure_running_loaded(self, app_id: str):
         s = self._states.get(app_id)
+        if self._dry_run:
+            # what-if: the caller already verified `fits`; report a would-be
+            # RUNNING/LOADED state without touching the real app (spec 15).
+            return types.SimpleNamespace(
+                process=ProcessState.RUNNING, residency=ResidencyState.LOADED
+            )
         if s.process in (ProcessState.STOPPED, ProcessState.ERROR):
             await self._apps.start(app_id)
             s = self._states.get(app_id)
@@ -526,6 +567,8 @@ class Scheduler:
 
     async def _do_switch(self, victim: AppConfig, app_id: str, trigger: str) -> bool:
         """spec 06 §17 graceful switch: unload (drained) → load → ready → drain queue."""
+        if self._dry_run:
+            return True  # what-if: the switch would succeed, but don't act (spec 15)
         await self._apps.unload(victim.id)
         # Evicted → no longer a drain target (spec 06 §2). Without this the
         # victim's stale `draining` flag survives re-load and blocks
@@ -603,6 +646,9 @@ class Scheduler:
         rec["vram"] = self._vram_accounting()
         rec["switch_tracking"] = self.switch_tracking()
         rec["boosts"] = self.boosts()
+        if self._dry_run:
+            # what-if: no bookkeeping, no event, no persistence (spec 15).
+            return rec
         self.last_decision = rec
         await self._bus.publish_raw("scheduler_decision", **rec)
         try:

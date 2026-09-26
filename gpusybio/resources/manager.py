@@ -51,6 +51,8 @@ class ResourceManager:
         self._last_sample: GpuSample | None = None
         self._lock = asyncio.Lock()
         self._last_change = 0.0
+        # GPU-activity threshold for idle detection (spec 06 §10, default 5%).
+        self.gpu_activity_threshold_pct: float = 5.0
 
     # -- properties --------------------------------------------------------
     @property

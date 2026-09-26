@@ -111,6 +111,31 @@ class Gateway(Base):
     )
 
 
+class GatewayApiKey(Base):
+    """Per-gateway API key (spec 12 §2). Only the SHA-256 hash is stored; the
+    plaintext key is shown once at creation."""
+
+    __tablename__ = "gateway_api_keys"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    gateway_id: Mapped[str] = mapped_column(Text, ForeignKey("gateways.id"), nullable=False)
+    name: Mapped[str | None] = mapped_column(Text)
+    key_hash: Mapped[str] = mapped_column(Text, nullable=False)  # sha256 hex
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AdminUser(Base):
+    """Local admin account (spec 12 §3). Password stored salted + hashed
+    (scrypt); only the hash is persisted, never the plaintext."""
+
+    __tablename__ = "admin_users"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    username: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)  # scrypt$<salt>$<hash>
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Request(Base):
     __tablename__ = "requests"
     __table_args__ = (
@@ -192,6 +217,25 @@ class MetricSample(Base):
     cpu_rss_mb: Mapped[float | None] = mapped_column(Float)
     threads: Mapped[int | None] = mapped_column(Integer)
     active_requests: Mapped[int | None] = mapped_column(Integer)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MetricAggregate(Base):
+    """Rolled-up metric windows (spec 08 §6): 1-minute (30 d) and hourly
+    (indefinite). Each row is one (scope, metric, window) aggregate."""
+
+    __tablename__ = "metrics_aggregate"
+    __table_args__ = (Index("ix_metrics_agg_scope_at", "scope", "metric", "at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(Text)  # "gpu" | app_id
+    metric: Mapped[str] = mapped_column(Text)  # e.g. gpu_mem_mb, active_requests
+    window_sec: Mapped[int] = mapped_column(Integer)  # 60 (1-min) or 3600 (hourly)
+    min: Mapped[float | None] = mapped_column(Float)
+    max: Mapped[float | None] = mapped_column(Float)
+    avg: Mapped[float | None] = mapped_column(Float)
+    total: Mapped[float | None] = mapped_column(Float)
+    count: Mapped[int] = mapped_column(Integer, default=1)
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -10,13 +10,25 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from gpusybio.auth.admin import (
+    admin_configured,
+    check_csrf,
+    create_admin,
+    create_session,
+    current_user,
+    delete_admin,
+    list_admins,
+    revoke_session,
+    validate_session,
+    verify_admin,
+)
 from gpusybio.config.seed import new_request_id
-from gpusybio.database.models import Application, Gateway, Request
+from gpusybio.database.models import Application, Gateway, Request as RequestModel
 from gpusybio.events.bus import PERSISTENT_EVENTS
 from gpusybio.events.sse import SSEHub
 from gpusybio.gateway.request_manager import RequestManager
@@ -36,6 +48,11 @@ class GatewayIn(BaseModel):
     request_timeout_sec: float | None = None
     max_concurrent_requests: int = 1
     enabled: bool = True
+
+
+class AuthBody(BaseModel):
+    username: str
+    password: str
 
 
 def _app_view(row: Application, state, resources) -> dict:
@@ -114,8 +131,123 @@ def make_admin_api(
     scheduler,
     metrics: MetricsCollector,
     hub: SSEHub,
+    idle_unloader=None,
+    bus=None,
 ) -> FastAPI:
     api = FastAPI(title="GPUSymbiosis", version="0.1.0")
+
+    async def bus_publish(action: str, actor: str | None, detail: str = ""):
+        """Publish an audit event to the bus + SSE (spec 12 §5)."""
+        if bus is not None:
+            await bus.publish_raw("audit", action=action, actor=actor, detail=detail)
+        try:
+            await hub.push({"type": "audit", "action": action, "actor": actor, "detail": detail})
+        except Exception:  # noqa: BLE001
+            pass
+
+    # -- admin auth (spec 12 §3) --------------------------------------------------
+    # State-changing admin endpoints require a valid session (+ CSRF) once any
+    # admin account exists; read-only GETs stay open (loopback default).
+    _AUTH_EXEMPT = {"/api/auth/login", "/api/auth/logout", "/api/auth/admins"}
+    _MUTATING = {"POST", "PUT", "DELETE", "PATCH"}
+
+    def _session_from_scope(scope) -> dict | None:
+        token = None
+        for k, v in scope.get("headers", []):
+            if k == b"cookie":
+                for part in v.decode("latin-1").split(";"):
+                    part = part.strip()
+                    if part.startswith("gslb_session="):
+                        token = part[len("gslb_session="):]
+                break
+        return validate_session(token)
+
+    def _session_from_request(request) -> dict | None:
+        return validate_session(request.cookies.get("gslb_session"))
+
+    def _csrf_from_request(request) -> str | None:
+        return request.headers.get("x-csrf-token")
+
+    @api.middleware("http")
+    async def _admin_auth(request, call_next):
+        if request.method in _MUTATING and request.url.path.startswith("/api/"):
+            if request.url.path not in _AUTH_EXEMPT and admin_configured(db):
+                session = _session_from_scope(request.scope)
+                if session is None:
+                    return JSONResponse({"error": "authentication required"}, status_code=401)
+                if not check_csrf(session, _csrf_from_request(request)):
+                    return JSONResponse({"error": "invalid or missing CSRF token"}, status_code=403)
+        return await call_next(request)
+
+    def _cookie_params(token: str | None, delete: bool = False) -> dict:
+        return {
+            "key": "gslb_session",
+            "value": "" if delete else token,
+            "max_age": 0 if delete else 12 * 3600,
+            "httponly": True,
+            "samesite": "strict",
+            "path": "/",
+        }
+
+    async def _audit(action: str, actor: str | None, detail: str = ""):
+        """Audit a state-changing action with the acting identity (spec 12 §5)."""
+        try:
+            await bus_publish(action, actor, detail=detail)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @api.post("/api/auth/login")
+    async def login(body: AuthBody, response: Response):
+        admin_id = verify_admin(db, body.username, body.password)
+        if admin_id is None:
+            raise HTTPException(401, "invalid credentials")
+        token, csrf = create_session(body.username)
+        response.set_cookie(**_cookie_params(token))
+        await _audit("admin_login", actor=body.username)
+        return {"username": body.username, "csrf": csrf, "token": token}
+
+    @api.post("/api/auth/logout")
+    async def logout(request: Request, response: Response):
+        session = _session_from_request(request)
+        if session is not None:
+            revoke_session(request.cookies.get("gslb_session"))
+        response.delete_cookie("gslb_session", path="/")
+        return {"ok": True}
+
+    @api.get("/api/auth/me")
+    async def me(request: Request):
+        session = _session_from_request(request)
+        if session is None:
+            raise HTTPException(401, "not authenticated")
+        return {"username": session["username"]}
+
+    @api.post("/api/auth/admins")
+    async def create_admin_endpoint(body: AuthBody, request: Request):
+        # Bootstrap: open when no admin exists; otherwise requires a session.
+        if admin_configured(db) and _session_from_request(request) is None:
+            raise HTTPException(401, "authentication required")
+        try:
+            admin_id, username = create_admin(db, body.username, body.password)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        await _audit("admin_created", actor=body.username, detail=f"admin {username}")
+        return {"id": admin_id, "username": username}
+
+    @api.get("/api/auth/admins")
+    async def list_admins_endpoint():
+        # Open (usernames only): lets the UI detect whether to show the login
+        # screen or the first-admin bootstrap screen. No passwords exposed.
+        return {"admins": list_admins(db)}
+
+    @api.delete("/api/auth/admins/{admin_id}")
+    async def delete_admin_endpoint(admin_id: str, request: Request):
+        session = _session_from_request(request)
+        if session is None:
+            raise HTTPException(401, "authentication required")
+        if not delete_admin(db, admin_id):
+            raise HTTPException(404, "not found")
+        await _audit("admin_deleted", actor=session["username"], detail=admin_id)
+        return {"ok": True}
 
     def _resource_view() -> dict:
         """Full resource view (spec 10 §3): GPU identity + utilisation + system."""
@@ -197,7 +329,10 @@ def make_admin_api(
         return {"id": app_id, "transition": None}
 
     @api.delete("/api/applications/{app_id}", status_code=202)
-    def delete_application(app_id: str):
+    def delete_application(app_id: str, confirm: bool = False):
+        # Destructive action (spec 12 §3): Delete requires explicit confirmation.
+        if not confirm:
+            raise HTTPException(409, "delete requires confirm=true")
         s = states.get(app_id)
         if s.process.value != "STOPPED" or s.active_requests > 0:
             raise HTTPException(409, "application is not stopped")
@@ -261,7 +396,10 @@ def make_admin_api(
         return await _transition(app_id, "start")
 
     @api.post("/api/applications/{app_id}/stop", status_code=202)
-    async def stop_application(app_id: str, force: bool = False):
+    async def stop_application(app_id: str, force: bool = False, confirm: bool = False):
+        # Destructive action (spec 12 §3): a Force Stop requires explicit confirmation.
+        if force and not confirm:
+            raise HTTPException(409, "force stop requires confirm=true")
         return await _transition(app_id, "stop", force)
 
     @api.post("/api/applications/{app_id}/load", status_code=202)
@@ -271,6 +409,40 @@ def make_admin_api(
     @api.post("/api/applications/{app_id}/unload", status_code=202)
     async def unload_application(app_id: str):
         return await _transition(app_id, "unload")
+
+    # -- pinned applications (spec 06 §3.1 / Phase 5) --------------------------
+    # Pinned apps are hard-excluded from automatic unloading (scheduler + idle
+    # unloader). The flag is persisted and reflected in the app status.
+    def _set_pinned(app_id: str, pinned: bool):
+        with db() as s:
+            row = s.get(Application, app_id)
+            if row is None:
+                raise HTTPException(404, "not found")
+            row.pinned = pinned
+        apps.load_config(app_id)
+        return {"id": app_id, "pinned": pinned}
+
+    @api.post("/api/applications/{app_id}/pin")
+    def pin_application(app_id: str):
+        return _set_pinned(app_id, True)
+
+    @api.post("/api/applications/{app_id}/unpin")
+    def unpin_application(app_id: str):
+        return _set_pinned(app_id, False)
+
+    # -- request cancellation (spec 05 §6.3 / Phase 5) -------------------------
+    @api.post("/api/requests/{request_id}/cancel", status_code=202)
+    async def cancel_request(request_id: str):
+        from gpusybio.database.models import Request
+
+        with db() as s:
+            row = s.get(Request, request_id)
+            if row is None:
+                raise HTTPException(404, "not found")
+            terminal = row.status in ("COMPLETED", "FAILED", "CANCELLED", "EXPIRED")
+        if not terminal:
+            await request_manager.cancel(request_id)
+        return {"id": request_id, "cancelled": not terminal}
 
     # -- gateways (spec 10 §2) -------------------------------------------------
     @api.post("/api/gateways", status_code=201)
@@ -316,7 +488,10 @@ def make_admin_api(
         return {"id": gw_id}
 
     @api.delete("/api/gateways/{gw_id}")
-    def delete_gateway(gw_id: str):
+    def delete_gateway(gw_id: str, confirm: bool = False):
+        # Destructive action (spec 12 §3): Delete requires explicit confirmation.
+        if not confirm:
+            raise HTTPException(409, "delete requires confirm=true")
         with db() as s:
             row = s.get(Gateway, gw_id)
             if row is None:
@@ -349,6 +524,33 @@ def make_admin_api(
             gc["enabled"] = False
         return {"id": gw_id, "enabled": False}
 
+    # -- per-gateway API keys (spec 12 §2) ------------------------------------
+    @api.post("/api/gateways/{gw_id}/keys", status_code=201)
+    def create_key(gw_id: str, name: str | None = None):
+        with db() as s:
+            if s.get(Gateway, gw_id) is None:
+                raise HTTPException(404, "not found")
+        from gpusybio.auth import create_key as _create_key
+
+        key_id, plaintext = _create_key(db, gw_id, name)
+        # The plaintext key is shown once at creation (spec 12 §2).
+        return {"id": key_id, "name": name, "key": plaintext}
+
+    @api.get("/api/gateways/{gw_id}/keys")
+    def list_keys(gw_id: str):
+        from gpusybio.auth import list_keys as _list_keys
+
+        return {"keys": _list_keys(db, gw_id)}
+
+    @api.delete("/api/gateways/{gw_id}/keys/{key_id}")
+    def delete_key(gw_id: str, key_id: str):
+        from gpusybio.auth import delete_key as _delete_key
+
+        ok = _delete_key(db, gw_id, key_id)
+        if not ok:
+            raise HTTPException(404, "not found")
+        return {"id": key_id, "deleted": True}
+
     @api.post("/api/gateways/{gw_id}/process-now", status_code=202)
     async def process_now(gw_id: str):
         from gpusybio.events.bus import PROCESS_NOW
@@ -358,7 +560,10 @@ def make_admin_api(
         return {"id": gw_id}
 
     @api.post("/api/gateways/{gw_id}/clear-queue")
-    async def clear_queue(gw_id: str):
+    async def clear_queue(gw_id: str, confirm: bool = False):
+        # Destructive action (spec 12 §3): Clear Queue requires explicit confirmation.
+        if not confirm:
+            raise HTTPException(409, "clear queue requires confirm=true")
         slots = request_manager.queue().clear(gw_id)
         for slot in slots:
             request_manager._forward.pop(slot.request_id, None)
@@ -390,12 +595,12 @@ def make_admin_api(
     @api.get("/api/requests")
     def list_requests(status: str | None = None, gateway_id: str | None = None, limit: int = 100):
         with db() as s:
-            q = s.query(Request)
+            q = s.query(RequestModel)
             if status:
-                q = q.filter(Request.status == status)
+                q = q.filter(RequestModel.status == status)
             if gateway_id:
-                q = q.filter(Request.gateway_id == gateway_id)
-            rows = q.order_by(Request.queued_at.desc()).limit(limit).all()
+                q = q.filter(RequestModel.gateway_id == gateway_id)
+            rows = q.order_by(RequestModel.queued_at.desc()).limit(limit).all()
             return [
                 {
                     "id": r.id,
@@ -433,6 +638,70 @@ def make_admin_api(
         out.sort(key=lambda x: x["at"] or "", reverse=True)
         return out[:limit]
 
+    # -- metrics (spec 08 §9.3) ----------------------------------------------
+    @api.get("/api/applications/{app_id}/metrics")
+    async def application_metrics(app_id: str, window: str = "1h"):
+        with db() as s:
+            if s.get(Application, app_id) is None:
+                raise HTTPException(404, "not found")
+        return await metrics.app_metrics(app_id, window)
+
+    @api.get("/api/metrics/summary")
+    def metrics_summary():
+        """Current / average / maximum triplets (spec 08 §6)."""
+        return metrics.aggregator.summary()
+
+    @api.get("/api/metrics/history")
+    def metrics_history(scope: str = "gpu", metric: str = "gpu_mem_mb",
+                        window: str = "1m", limit: int = 500):
+        window_sec = 3600 if window == "1h" else 60
+        return metrics.aggregator.history(scope, metric, window_sec, limit)
+
+    @api.get("/api/metrics/request")
+    def request_metrics():
+        """Per-application and per-gateway request/latency metrics (spec 08 §2/§4)."""
+        return {
+            "applications": metrics.app_request_metrics(),
+            "gateways": metrics.gateway_request_metrics(),
+        }
+
+    @api.get("/api/metrics/prometheus")
+    def prometheus():
+        """Prometheus text exposition (spec 13 §3)."""
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(
+            metrics.prometheus(), media_type="text/plain; version=0.0.4; charset=utf-8"
+        )
+
+    @api.get("/api/idle/status")
+    def idle_status():
+        """Per-application idle state (spec 06 §10): active, idle-for, unloadable."""
+        if idle_unloader is None:
+            return {"applications": {}}
+        import time as _time
+
+        from gpusybio.applications.lifecycle import ProcessState, ResidencyState
+
+        now = _time.time()
+        out: dict[str, dict] = {}
+        for app_id in states.all():
+            s = states.get(app_id)
+            active = idle_unloader.is_active(app_id)
+            last = idle_unloader.last_active(app_id)
+            idle_for = round(now - last, 1) if last is not None and not active else None
+            ok, reason = idle_unloader._can_auto_unload(app_id) if (
+                s.process is ProcessState.RUNNING and s.residency is ResidencyState.LOADED
+            ) else (False, "not loaded")
+            out[app_id] = {
+                "active": active,
+                "idle_for_sec": idle_for,
+                "method": "requests" if idle_unloader._has_gateway(app_id) else "gpu_usage",
+                "auto_unloadable": ok,
+                "reason": reason,
+            }
+        return {"applications": out}
+
     @api.get("/api/scheduler/current-decision")
     def current_decision():
         d = dict(scheduler.last_decision or {})
@@ -453,6 +722,19 @@ def make_admin_api(
         d.setdefault("boosts", scheduler.boosts())
         d.setdefault("vram", scheduler._vram_accounting())
         return d
+
+    # -- what-if simulation (spec 15 §Phase 5) ------------------------------------
+    @api.post("/api/scheduler/simulate")
+    async def simulate(body: dict | None = None):
+        """Evaluate the scoring model against current state WITHOUT acting.
+
+        Runs the same decision logic as a live trigger in dry-run mode: no
+        forwards, loads, switches, boosts or decision bookkeeping are applied.
+        The response is the decision that *would* have been made, tagged
+        ``simulated: true`` (spec 15: "what-if mode ... without acting").
+        """
+        trigger = (body or {}).get("trigger", "reconcile")
+        return await scheduler.simulate(trigger)
 
     # -- SSE (spec 11 §1) ----------------------------------------------------------
     @api.get("/api/events/sse")

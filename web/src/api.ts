@@ -175,8 +175,48 @@ async function post(url: string): Promise<void> {
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
 }
 
+export interface MetricItem {
+  id: string;
+  name: string;
+  unit: string;
+  kind: string;
+  display: string;
+  value: number | string | null;
+}
+
+export interface AppMetrics {
+  application_id: string;
+  type: string;
+  window: string;
+  state: {
+    process_state: string;
+    residency_state: string;
+    active_requests: number;
+    queued_requests: number;
+  };
+  metrics: MetricItem[];
+  raw: Record<string, unknown>;
+  active_time: {
+    total_active_time?: number;
+    loaded_time?: number;
+    processing_time?: number;
+    idle_loaded_time?: number;
+  };
+  spec: MetricItem[];
+}
+
 export const api = {
   status: () => getJson<Status>("/api/status"),
+  appMetrics: (id: string, window = "1h") =>
+    getJson<AppMetrics>(`/api/applications/${id}/metrics?window=${window}`),
+  requestMetrics: () =>
+    getJson<Record<string, Record<string, number>>>(`/api/metrics/request`),
+  metricsSummary: () =>
+    getJson<Record<string, Record<string, Record<string, number>>>>(`/api/metrics/summary`),
+  metricsHistory: (scope: string, metric: string, window = "1m") =>
+    getJson<{ at: string; min: number; max: number; avg: number; count: number }[]>(
+      `/api/metrics/history?scope=${scope}&metric=${metric}&window=${window}`
+    ),
   requests: (limit = 50) => getJson<RequestRow[]>(`/api/requests?limit=${limit}`),
   events: (limit = 100) => getJson<EventRow[]>(`/api/events?limit=${limit}`),
   gpu: () => getJson<GpuSample>("/api/gpu"),

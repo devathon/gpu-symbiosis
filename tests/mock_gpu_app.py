@@ -16,11 +16,22 @@ import asyncio
 import json
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import StreamingResponse
 
 app = FastAPI()
-STATE = {"loaded": False, "active": 0, "name": "mock", "chunks_done": 0}
+STATE = {
+    "loaded": False,
+    "active": 0,
+    "name": "mock",
+    "chunks_done": 0,
+    # cumulative token / request metrics (spec 08 §5)
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "requests": 0,
+    "completed_requests": 0,
+    "failed_requests": 0,
+}
 
 
 @app.get("/health")
@@ -53,6 +64,15 @@ def state():
     return STATE
 
 
+@app.websocket("/ws")
+async def ws_echo(ws: WebSocket):
+    """WebSocket echo: replies 'ws-echo:<msg>' to each text message (Phase 5 WS)."""
+    await ws.accept()
+    while True:
+        msg = await ws.receive_text()
+        await ws.send_text(f"ws-echo:{msg}")
+
+
 @app.post("/generate")
 async def generate(body: dict):
     if not STATE["loaded"]:
@@ -60,6 +80,13 @@ async def generate(body: dict):
     chunks = int(body.get("chunks", 3))
     delay = float(body.get("delay", 0.1))
     name = STATE["name"]
+
+    # Simulate token counts: prompt tokens from the request, one token per chunk.
+    input_tokens = int(body.get("input_tokens", 16))
+    STATE["input_tokens"] += input_tokens
+    STATE["output_tokens"] += chunks
+    STATE["requests"] += 1
+    STATE["completed_requests"] += 1
 
     async def gen():
         STATE["active"] += 1
@@ -72,7 +99,24 @@ async def generate(body: dict):
         finally:
             STATE["active"] -= 1
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        gen(), media_type="text/event-stream",
+        headers={"X-Input-Tokens": str(input_tokens), "X-Output-Tokens": str(chunks)},
+    )
+
+
+@app.get("/stats")
+def stats():
+    return {
+        "loaded": STATE["loaded"],
+        "active": STATE["active"],
+        "requests": STATE["requests"],
+        "completed_requests": STATE["completed_requests"],
+        "failed_requests": STATE["failed_requests"],
+        "input_tokens": STATE["input_tokens"],
+        "output_tokens": STATE["output_tokens"],
+        "total_tokens": STATE["input_tokens"] + STATE["output_tokens"],
+    }
 
 
 def main():

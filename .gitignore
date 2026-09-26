@@ -13,6 +13,7 @@ web/tsconfig.tsbuildinfo
 
 # Runtime / logs
 .run.log
+.devserver.log
 
 # Scratch / captures
 .c0.txt

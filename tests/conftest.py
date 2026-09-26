@@ -37,7 +37,36 @@ A1_GW, A2_GW = 9511, 9512
 ADMIN_PORT = 9530
 
 
-def make_config(scheduler: SchedulerSpec | None = None) -> Config:
+def build_app_spec(app_id, name, port, *, loaded=True, gpu_memory_mb=None, app_types=None):
+    """Build an ApplicationSpec for a mock GPU app (reusable by test modules)."""
+    pidfile = f"/tmp/gpusybio-{app_id}.pid"
+    log = f"/tmp/gpusybio-{app_id}.log"
+    if gpu_memory_mb is None:
+        gpu_memory_mb = 18432 if app_id == "a1" else 12288
+    return ApplicationSpec(
+        id=app_id,
+        name=name,
+        start_script=(
+            f"nohup {PY} {MOCK} --port {port} --name {name}"
+            + (" --start-loaded" if loaded else "")
+            + f" >{log} 2>&1 & echo $! > {pidfile}; sleep 0.2; echo $(cat {pidfile})"
+        ),
+        stop_script=f"kill $(cat {pidfile}) 2>/dev/null; sleep 0.3; true",
+        load_script=f"curl -s -X POST http://127.0.0.1:{port}/load",
+        unload_script=f"curl -s -X POST http://127.0.0.1:{port}/unload",
+        port=port,
+        health_check_url=f"http://127.0.0.1:{port}/health",
+        ready_check_url=f"http://127.0.0.1:{port}/ready",
+        gpu_memory_mb=gpu_memory_mb,
+        application_type=(app_types or {}).get(app_id, "custom"),
+    )
+
+
+def make_config(
+    scheduler: SchedulerSpec | None = None,
+    application_types: dict[str, str] | None = None,
+    applications: list[ApplicationSpec] | None = None,
+) -> Config:
     tmp = f"/tmp/gpusybio-e2e-{os.getpid()}.db"
     if os.path.exists(tmp):
         os.unlink(tmp)
@@ -45,31 +74,16 @@ def make_config(scheduler: SchedulerSpec | None = None) -> Config:
         if os.path.exists(f):
             os.unlink(f)
 
-    def app_spec(app_id, name, port, pidfile, log, loaded):
-        return ApplicationSpec(
-            id=app_id,
-            name=name,
-            start_script=(
-                f"nohup {PY} {MOCK} --port {port} --name {name}"
-                + (" --start-loaded" if loaded else "")
-                + f" >{log} 2>&1 & echo $! > {pidfile}; sleep 0.2; echo $(cat {pidfile})"
-            ),
-            stop_script=f"kill $(cat {pidfile}) 2>/dev/null; sleep 0.3; true",
-            load_script=f"curl -s -X POST http://127.0.0.1:{port}/load",
-            unload_script=f"curl -s -X POST http://127.0.0.1:{port}/unload",
-            port=port,
-            health_check_url=f"http://127.0.0.1:{port}/health",
-            ready_check_url=f"http://127.0.0.1:{port}/ready",
-            gpu_memory_mb=18432 if app_id == "a1" else 12288,
-        )
+    types = application_types or {}
 
     return Config(
         db_path=tmp,
         admin_host="127.0.0.1",
         admin_port=ADMIN_PORT,
-        applications=[
-            app_spec("a1", "qwen38", A1_PORT, "/tmp/gpusybio-a1.pid", "/tmp/gpusybio-a1.log", loaded=True),
-            app_spec("a2", "llama31", A2_PORT, "/tmp/gpusybio-a2.pid", "/tmp/gpusybio-a2.log", loaded=True),
+        applications=applications
+        or [
+            build_app_spec("a1", "qwen38", A1_PORT, loaded=True, app_types=types),
+            build_app_spec("a2", "llama31", A2_PORT, loaded=True, app_types=types),
         ],
         # Both apps load their model at process start (llama-server style);
         # load/unload scripts remain available for the reload cycle.
@@ -131,7 +145,9 @@ def cfg_overrides():
 @pytest.fixture
 async def server(cfg_overrides):
     scheduler = cfg_overrides.get("scheduler")
-    srv = Server(make_config(scheduler))
+    app_types = cfg_overrides.get("application_types")
+    apps = cfg_overrides.get("applications")
+    srv = Server(make_config(scheduler, application_types=app_types, applications=apps))
     task = asyncio.create_task(srv.serve())
     await _wait(lambda: _port_up(ADMIN_PORT), timeout=10)
     yield srv
@@ -152,9 +168,9 @@ async def _app_state(c, app_id):
     return r.json()
 
 
-async def _stream(c, url, payload):
+async def _stream(c, url, payload, headers=None):
     text = ""
-    async with c.stream("POST", url, json=payload, timeout=60.0) as r:
+    async with c.stream("POST", url, json=payload, headers=headers, timeout=60.0) as r:
         assert r.status_code == 200
         async for chunk in r.aiter_text():
             text += chunk

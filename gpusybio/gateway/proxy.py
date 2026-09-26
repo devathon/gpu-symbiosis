@@ -69,12 +69,39 @@ def make_gateway_proxy(
     session,
     app_state,
     app_cfg,
+    verify_key=None,
 ):
-    """Build the ASGI app for one gateway port."""
+    """Build the ASGI app for one gateway port.
+
+    ``verify_key`` (optional, spec 12 §2) is a callable ``presented_key -> bool``
+    checked **before** queueing: an invalid key → 401 and the request never
+    enters the queue.
+    """
     gateway_id = gateway["id"]
     app_id = gateway["application_id"]
     app_port = app_cfg["port"]
     upstream = f"http://127.0.0.1:{app_port}"
+
+    def _bearer(scope: dict) -> str | None:
+        for k, v in scope.get("headers", []):
+            key = k.decode() if isinstance(k, bytes) else str(k)
+            if key.lower() == "authorization":
+                val = v.decode() if isinstance(v, bytes) else str(v)
+                if val.lower().startswith("bearer "):
+                    return val[7:].strip()
+        return None
+
+    async def _auth_ok(scope: dict, send) -> bool:
+        """Return True if the request may proceed; otherwise send a 401."""
+        if verify_key is None:
+            return True
+        if verify_key(_bearer(scope)):
+            return True
+        try:
+            await _send_error(send, 401, "invalid or missing API key")
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
@@ -137,6 +164,10 @@ def make_gateway_proxy(
         body = await _read_body(receive)
         if body is None:
             return  # client disconnected during body read
+
+        # API-key auth (spec 12 §2) — checked before queueing.
+        if not await _auth_ok(scope, send):
+            return
 
         if not gateway.get("enabled", True):
             await _send_error(send, 503, "gateway disabled")
@@ -299,6 +330,14 @@ def make_gateway_proxy(
 
             if wait_signal in done and wait_signal.result():
                 watch.cancel()
+                # The event was set: either the scheduler signaled a forward, or the
+                # request reached a terminal state (cancelled/expired). Distinguish.
+                if request_manager.is_terminal(slot.request_id):
+                    try:
+                        await _send_error(send, 409, "request cancelled")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return False
                 return True
             if watch in done:
                 msg = watch.result()
@@ -348,6 +387,10 @@ def make_gateway_proxy(
     # -- WebSocket (Phase 1: direct bridge when ready; no WS queueing yet) ----
     async def _handle_ws(scope, receive, send):
         import aiohttp
+
+        # API-key auth (spec 12 §2) — before bridging.
+        if not await _auth_ok(scope, send):
+            return
 
         if not gateway.get("enabled", True) or not request_manager.can_forward_now(gateway_id):
             try:

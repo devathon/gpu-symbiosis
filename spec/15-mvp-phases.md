@@ -80,7 +80,7 @@ with **409** + `{required_mb, free_mb, residents}`. Invariant 2
 ([14](14-invariants.md)) therefore holds globally, not only on the automatic
 scheduler path; an already-resident app is never blocked (zero-cost pass).
 
-## Phase 3 — Metrics
+## Phase 3 — Metrics  ✅ **DONE**
 
 Add:
 
@@ -100,7 +100,7 @@ extensible **TypeSpec / type-metrics contract** ([08 §9](08-metrics-module.md#9
 type registry, built-in + custom handlers, `/api/applications/{id}/metrics`, and the
 auto-rendered per-type UI panel.
 
-## Phase 4 — Advanced Residency
+## Phase 4 — Advanced Residency  ✅ **DONE**
 
 Add:
 
@@ -116,7 +116,15 @@ Delivers the full resource-residency model ([02 §3](02-architecture.md#3-key-ar
 coexistence, non-API activity detection ([06 §10](06-scheduler.md#10-non-api-applications--idle-unloading)),
 unload candidate scoring ([06 §3](06-scheduler.md#3-unload-candidate-selection)).
 
-## Phase 5 — Advanced Features
+Done: two-app coexistence (`tests/test_residency.py`), a background `IdleUnloader`
+classifying API apps by in-flight requests and non-API apps by GPU utilization,
+automatic idle unload (same hard exclusions + min-residency + pending-demand
+guards as the eviction path), `GET /api/idle/status`, and the scheduler
+knobs `idle_unload_timeout_sec` / `idle_unload_interval_sec` plus per-app
+`idle_unload_timeout_sec` / `activity_detection_method` / `idle_threshold_gpu_pct`
+(`tests/test_idle.py`).
+
+## Phase 5 — Advanced Features  ✅ **DONE**
 
 Add:
 
@@ -159,3 +167,61 @@ historical data without acting.
   Known Phase 1 simplifications (deferred, per this plan): WebSocket proxying
   (Phase 5), concurrent multi-app streaming (Phase 5), buffer-less request bodies,
   and live listener spawn for API-created gateways.
+
+- **Phase 2 — DONE.** The full gateway scoring model and anti-thrash controls are
+  live and covered by `tests/test_scoring.py` (unit), `tests/test_e2e_core_loop.py`,
+  and `tests/test_scheduling_behavior.py`. The Scheduler Explainer UI
+  ([11 §5](11-web-ui.md#5-scheduler-explainer)) is served at the admin port.
+
+- **Phase 3 — DONE.** The metrics module ([08](08-metrics-module.md)) is live:
+  1-second sampling, retention/aggregation pipeline (raw 24 h, 1-min 30 d, hourly
+  indefinite), request & latency percentiles (P50/P95/P99), token metrics,
+  active-time tracking, the **TypeSpec / type-metrics contract** ([08 §9]) with
+  built-in + generic handlers, `GET /api/applications/{id}/metrics`, and the
+  auto-rendered per-type UI panel. Covered by `tests/test_metrics.py` (unit + E2E).
+
+- **Phase 4 — DONE.** The full resource-residency model is live: multi-application
+  coexistence ([02 §3]) — `tests/test_residency.py` boots two 8 GB apps on the 24 GB
+  fake GPU and asserts both stay resident and each serves its own gateway. A
+  background `IdleUnloader` performs automatic idle detection ([06 §10]) — API apps
+  by in-flight requests, non-API apps (e.g. ComfyUI) by GPU utilization against a
+  per-app threshold — and automatic idle unloading subject to the same hard
+  exclusions, minimum-residency and pending-demand guards as the eviction path
+  ([06 §3.1]), with `GET /api/idle/status` and the scheduler knobs
+  `idle_unload_timeout_sec` / `idle_unload_interval_sec`. Retention scoring
+  ([06 §3]) is the Phase 2 eviction scorer. Covered by `tests/test_idle.py` and
+  `tests/test_residency.py`.
+
+- **Phase 5 (MVP) — DONE.** The remaining MVP features are live:
+
+  - **Gateway API keys** ([12 §2]): per-gateway `Authorization: Bearer <key>`
+    checked before queueing (invalid key → 401, never enqueued); key CRUD +
+    rotation via the admin API. Auth is optional in development — no keys
+    configured → allow all. Covered by `tests/test_auth.py`.
+  - **Admin authentication** ([12 §3]): local admin accounts with salted scrypt
+    hashing (`scrypt$<salt>$<hash>`), session-based auth (httpOnly
+    SameSite=Strict cookie), CSRF protection (double-submit token) on
+    state-changing endpoints, and explicit confirmation for destructive actions
+    (Force Stop / Delete / Clear Queue). Auth is optional in development — open
+    until the first admin exists. Covered by `tests/test_admin_auth.py`.
+  - **Request cancellation** ([05 §6.3]): cancel a queued or in-flight request
+    via `POST /api/requests/{id}/cancel` (202); the proxy wakes the client and
+    returns 409 "request cancelled" when the request reaches a terminal state.
+    Covered by `tests/test_phase5_misc.py`.
+  - **Pinned applications** ([06 §3.1]): pinned apps are excluded from automatic
+    idle unloading and eviction; `POST/DELETE /api/applications/{id}/pin`.
+    Covered by `tests/test_phase5_misc.py`.
+  - **Load-failure recovery** ([06 §9]): repeated load failures trip a faulted
+    back-off (the app is not retried while faulted) and are surfaced in the
+    application status; clearing the fault re-enables loading. Covered by
+    `tests/test_phase5_misc.py`.
+  - **WebSocket + streaming hardening**: the gateway proxies WebSocket traffic
+    to the application, and concurrent multi-application streaming keeps each
+    client's stream isolated (no cross-talk). Covered by
+    `tests/test_phase5_streaming.py`.
+  - **Scheduler simulation (what-if)**: `POST /api/scheduler/simulate` runs the
+    scoring model against the current state without acting — it reports the
+    decision + scores it *would* make and doubles as an integration harness
+    ([16](16-integration.md)). Covered by `tests/test_phase5_simulate.py`.
+
+  The full Phase 5 suite passes alongside the existing tests (54 passing).

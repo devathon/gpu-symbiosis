@@ -6,6 +6,7 @@ import EventFeed from "./components/EventFeed";
 import RequestsTable from "./components/RequestsTable";
 import GpuChart from "./components/GpuChart";
 import SchedulerExplainer from "./components/SchedulerExplainer";
+import MetricsPanel from "./components/MetricsPanel";
 
 const MAX_SAMPLES = 180;
 
@@ -170,6 +171,10 @@ export default function App() {
 
       <div className="mb-6">
         <SchedulerExplainer d={decision} />
+      </div>
+
+      <div className="mb-6">
+        <MetricsPanel apps={apps.map((a) => ({ id: a.id, name: a.name }))} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">

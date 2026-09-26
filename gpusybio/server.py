@@ -29,6 +29,7 @@ from gpusybio.metrics import MetricsCollector
 from gpusybio.resources.gpu import make_backend
 from gpusybio.resources.manager import ResourceManager
 from gpusybio.scheduler import Scheduler
+from gpusybio.scheduler.idle import IdleUnloader
 from gpusybio.state import StateManager
 
 log = get_logger("server")
@@ -82,10 +83,24 @@ class Server:
             self.states, self.resources, self.request_manager, self.apps,
             config.settings, self.db, self.bus, self.app_ids, self.gateway_ids
         )
-        self.metrics = MetricsCollector(self.resources, self.states, self.request_manager, self.db, self.app_ids)
+        self.metrics = MetricsCollector(
+            self.resources, self.states, self.request_manager, self.db, self.app_ids,
+            app_types={a.id: a.application_type for a in config.applications},
+            base_urls={a.id: f"http://127.0.0.1:{a.port}" for a in config.applications},
+        )
+        # Phase 4 (spec 06 §10): automatic idle detection + unloading.
+        self.idle_unloader = IdleUnloader(
+            self.resources, self.states, self.apps, self.request_manager, self.bus,
+            self.app_ids, self.gateway_ids,
+            min_residency_sec=float(config.settings.scheduler.min_residency_sec),
+            default_idle_timeout_sec=float(config.settings.scheduler.idle_unload_timeout_sec),
+            interval=float(config.settings.scheduler.idle_unload_interval_sec),
+        )
         self.admin_api = make_admin_api(
             self.db, self.states, self.resources, self.request_manager,
-            self.apps, self.scheduler, self.metrics, self.hub
+            self.apps, self.scheduler, self.metrics, self.hub,
+            idle_unloader=self.idle_unloader,
+            bus=self.bus,
         )
         self._tasks: list[asyncio.Task] = []
         self._servers: list[uvicorn.Server] = []
@@ -101,7 +116,13 @@ class Server:
             "port": app_cfg.port,
             "max_concurrent_requests": app_cfg.max_concurrent_requests,
         }
-        return make_gateway_proxy(gw, self.request_manager, self.session, self.states, app_view)
+        from gpusybio.auth import verify_key as _verify_key
+
+        db = self.db
+        return make_gateway_proxy(
+            gw, self.request_manager, self.session, self.states, app_view,
+            verify_key=lambda presented: _verify_key(db, gw_id, presented),
+        )
 
     # -- startup (spec 09 §8) --------------------------------------------------
     def _reconcile(self) -> None:
@@ -149,6 +170,7 @@ class Server:
         self._tasks.append(asyncio.create_task(self.resources.sampling_loop(), name="resources"))
         self.scheduler.start()
         self.metrics.start()
+        self.idle_unloader.start()
 
         # Wait for all listeners.
         try:
@@ -186,10 +208,11 @@ class Server:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         except BaseException:  # noqa: BLE001
             pass
-        # Scheduler/metrics keep-alive loops.
+        # Scheduler/metrics/idle keep-alive loops.
         try:
             await self.scheduler.stop()
             await self.metrics.stop()
+            await self.idle_unloader.stop()
         except Exception:  # noqa: BLE001
             pass
         if self.session is not None:

@@ -97,6 +97,9 @@ class SchedulerSpec(BaseModel):
     # gateway's queue drains.
     process_now_multiplier: float = Field(default=2.0, ge=1.0)
     process_now_boost_ttl_sec: float = Field(default=120.0, ge=1.0)
+    # Phase 4 (spec 06 §10): automatic idle detection + unloading.
+    idle_unload_timeout_sec: float = Field(default=300.0, ge=1.0)
+    idle_unload_interval_sec: float = Field(default=5.0, ge=0.5)
 
 
 class MetricsSpec(BaseModel):

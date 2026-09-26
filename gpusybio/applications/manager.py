@@ -61,6 +61,10 @@ class AppConfig:
     consecutive_load_failures: int
     faulted_until: float | None
     process_name: str | None
+    # Phase 4 (spec 06 §10): per-app idle-unload timeout (None → global default).
+    idle_unload_timeout_sec: int | None = None
+    activity_detection_method: str = "gpu_usage"
+    idle_threshold_gpu_pct: float = 5.0
     # Measured timings (spec 11 §2.3: auto-calculated; feed switch cost, spec 06 §11).
     startup_time_sec: float | None = None
     load_time_sec: float | None = None
@@ -69,9 +73,15 @@ class AppConfig:
 
     @classmethod
     def from_row(cls, row: Application) -> "AppConfig":
+        # SQLite returns naive datetimes; they were written as UTC (spec 04 §9).
         faulted_until = None
         if row.faulted_until is not None:
-            faulted_until = row.faulted_until.timestamp()
+            from datetime import timezone
+
+            fu = row.faulted_until
+            if fu.tzinfo is None:
+                fu = fu.replace(tzinfo=timezone.utc)
+            faulted_until = fu.timestamp()
         return cls(
             id=row.id,
             name=row.name,
@@ -99,6 +109,9 @@ class AppConfig:
             load_time_sec=row.load_time_sec,
             unload_time_sec=row.unload_time_sec,
             stop_time_sec=row.stop_time_sec,
+            idle_unload_timeout_sec=row.idle_unload_timeout_sec,
+            activity_detection_method=row.activity_detection_method or "gpu_usage",
+            idle_threshold_gpu_pct=row.idle_threshold_gpu_pct if row.idle_threshold_gpu_pct is not None else 5.0,
         )
 
 
@@ -250,6 +263,9 @@ class ApplicationManager:
             self._states.set_draining(app_id, False)
 
         t0 = time.monotonic()
+        # Unload first: STOPPING is only valid with residency OFF (spec 04 §4.2).
+        if s.residency in (ResidencyState.LOADED, ResidencyState.UNLOADING, ResidencyState.LOADING):
+            self._states.set_residency(app_id, ResidencyState.OFF)
         self._states.set_process(app_id, ProcessState.STOPPING)
         await self._emit("STOP", app_id=app_id, forced=force)
 

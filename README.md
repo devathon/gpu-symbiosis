@@ -185,3 +185,155 @@ uv run pytest tests/test_scoring.py                 # scoring model + guards (un
 uv run pytest tests/test_e2e_core_loop.py           # core loop under the full model
 uv run pytest tests/test_scheduling_behavior.py     # residency / margin / emergency / boost / cooldown / 409
 ```
+
+## Implementation — Phase 3 (done): Metrics
+
+Phase 3 implements the metrics module per
+[08](spec/08-metrics-module.md) and
+[15 §Phase 3](spec/15-mvp-phases.md#phase-3--metrics--done).
+
+**Sampling & history (08 §1/§6/§7).** A 1-second sampler records GPU (VRAM,
+utilization, temperature, power) and per-application (memory, utilization,
+active requests) samples to a rolling `MetricSample` table. A background
+aggregator rolls raw samples up to 1-minute (kept 30 days) and hourly (kept
+indefinitely) `MetricAggregate` rows with min/max/avg/sum, and prunes raw
+samples beyond 24 h. Active time is accumulated per application while it is
+LOADED — split into *processing* (active requests > 0) and *idle-loaded*
+(resident but idle).
+
+**Request & latency metrics (08 §2/§4).** Every request that is received and
+completed/failed/cancelled is tracked per application and per gateway:
+received/completed/failed counts, queue wait (started − queued) and service
+(completed − started) tracked **separately**, average + **P50/P95/P99**
+latency percentiles (linear interpolation), arrival rate (received/min) and
+service rate (completed/min), and rolling last-1m/5m/15m counts.
+
+**Type-metrics contract (08 §5/§9).** Each application type declares a
+**TypeSpec** — a list of `MetricDef`s (id, name, unit, kind, display,
+collection source, aggregation). Built-in specs exist for llama/ollama
+(token counts, tokens/sec, prompt & generation tok/s, request counts, via a
+`/stats` poll), ComfyUI, TTS, and a generic fallback that works for every
+application. The metrics API
+(`GET /api/applications/{id}/metrics?window=`) returns the live values for the
+application's spec plus the common metrics (requests, latency percentiles,
+wait/service), and the **Web UI auto-renders the panel from the spec** — so a
+new application type renders its metrics without any UI change.
+
+**Endpoints.** `GET /api/applications/{id}/metrics`, `GET
+/api/metrics/request` (per-app + per-gateway request metrics), `GET
+/api/metrics/summary` (current/avg/max per metric), `GET /api/metrics/history`
+(aggregated history for a scope+metric over a window).
+
+### Tests
+
+```bash
+uv run pytest tests/test_metrics.py       # request/latency metrics, TypeSpec, handler, aggregator, active time, metrics API
+```
+
+## Implementation — Phase 4 (done): Advanced Residency
+
+Phase 4 completes the resource-residency model per
+[02 §3](spec/02-architecture.md#3-key-architectural-decision),
+[06 §10](spec/06-scheduler.md#10-non-api-applications--idle-unloading) and
+[06 §3](spec/06-scheduler.md#3-unload-candidate-selection) — see
+[15 §Phase 4](spec/15-mvp-phases.md#phase-4--advanced-residency--done).
+
+**Multi-application residency (coexistence, 02 §3).** When memory allows,
+multiple applications are resident simultaneously: the fit check
+(06 §7) only evicts a resident when an incoming app does not fit alongside the
+current residents. `tests/test_residency.py` boots two 8 GB apps on the 24 GB
+fake GPU and asserts both stay LOADED at once, each serving its own gateway.
+
+**Automatic idle detection (06 §10).** A background `IdleUnloader` ticks on a
+short interval (default 5 s) and classifies each resident as *active* or
+*idle*:
+
+- **API applications** (have a gateway) — active while they have in-flight
+  requests; idle when `active_requests == 0`.
+- **Non-API applications** (e.g. ComfyUI) — tracked via GPU utilization; active
+  while `process GPU% ≥ idle threshold` (default 5 %, per-app override),
+  idle below it.
+
+**Automatic unloading (06 §10).** When a resident has been idle longer than its
+idle timeout (default 300 s, per-app override), it is auto-unloaded — subject
+to the same hard exclusions as the eviction path (06 §3.1): never while
+`active_requests > 0`, never when `allow_automatic_unload` is false, never when
+pinned (automatic path), plus a minimum-residency guard and a pending-demand
+suppression (queued requests or recent arrivals). The unload publishes an
+`IDLE_TIMEOUT` event then drives the normal unload lifecycle (so a subsequent
+request reloads and serves it).
+
+**Application retention scoring (06 §3).** Unload-candidate selection scores
+residents by `unload_score = idle_pressure + low_demand_pressure +
+low_priority_pressure + residency_pressure − unload_cost` and evicts the lowest
+retention value first (implemented in the scheduler; see Phase 2).
+
+**Endpoints & config.** `GET /api/idle/status` reports per-app
+`active`/`idle_for_sec`/`method`/`auto_unloadable`/`reason`. New scheduler
+knobs: `idle_unload_timeout_sec` (default 300 s) and
+`idle_unload_interval_sec` (default 5 s); per-app `idle_unload_timeout_sec`,
+`activity_detection_method`, `idle_threshold_gpu_pct`.
+
+### Tests
+
+```bash
+uv run pytest tests/test_idle.py         # idle detection (API + non-API GPU), exclusions, min-residency, pending demand, auto-unload + re-serve, idle-status API
+uv run pytest tests/test_residency.py    # two-app coexistence, both resident + both served
+```
+
+## Implementation — Phase 5 (MVP, done)
+
+Phase 5 delivers the remaining MVP features per
+[15 §Phase 5](spec/15-mvp-phases.md#phase-5-mvp--done).
+
+**Gateway API keys (12 §2).** Per-gateway `Authorization: Bearer <key>` is
+checked before queueing — an invalid key is rejected with 401 and never
+enqueued. Keys are managed via `POST/GET /api/gateways/{id}/keys` and
+`DELETE /api/gateways/{id}/keys/{key_id}` (only a prefix + created-at are
+returned; hashes are stored). Auth is optional in development — a gateway with
+no keys allows all requests. Covered by `tests/test_auth.py`.
+
+**Admin authentication (12 §3).** Local admin accounts with salted scrypt
+hashing (`scrypt$<salt>$<hash>`, n=16384 r=8 p=1), session-based auth via an
+httpOnly SameSite=Strict cookie, and CSRF protection (double-submit token) on
+state-changing endpoints. Destructive actions (Force Stop, Delete, Clear Queue)
+require explicit confirmation (`confirm=true`) and are audited in the event log
+with the acting identity (12 §5). Auth is optional in development — the admin
+API is open until the first admin exists. Endpoints:
+`POST /api/auth/admins` (bootstrap), `POST /api/auth/login`,
+`POST /api/auth/logout`, `GET /api/auth/me`, `GET /api/auth/admins`,
+`DELETE /api/auth/admins/{id}`. Covered by `tests/test_admin_auth.py`.
+
+**Request cancellation (05 §6.3).** `POST /api/requests/{id}/cancel` (202)
+cancels a queued or in-flight request. The proxy wakes the client and returns
+409 "request cancelled" when the request reaches a terminal state (no orphan
+queued requests, no hung clients). Covered by `tests/test_phase5_misc.py`.
+
+**Pinned applications (06 §3.1).** Pinned apps are excluded from automatic idle
+unloading and eviction: `POST /api/applications/{id}/pin` and
+`DELETE /api/applications/{id}/pin`. Covered by `tests/test_phase5_misc.py`.
+
+**Load-failure recovery (06 §9).** Repeated load failures trip a faulted
+back-off (`faulted_until`), so a failing app is not retried while faulted; the
+fault is surfaced in the application status and clearing it re-enables loading.
+Covered by `tests/test_phase5_misc.py`.
+
+**WebSocket + streaming hardening.** The gateway proxies WebSocket traffic to
+the application (`ws://` → app `/ws`), and concurrent multi-application
+streaming keeps each client's stream isolated (no cross-talk between apps).
+Covered by `tests/test_phase5_streaming.py`.
+
+**Scheduler simulation (what-if).** `POST /api/scheduler/simulate` runs the
+scoring model against the current state *without acting* — it reports the
+decision and scores it would make and doubles as an integration harness
+(16). Covered by `tests/test_phase5_simulate.py`.
+
+### Tests
+
+```bash
+uv run pytest tests/test_auth.py              # gateway API keys (auth optional in dev)
+uv run pytest tests/test_admin_auth.py        # admin auth: scrypt, sessions, CSRF, confirmation, dev-mode open
+uv run pytest tests/test_phase5_misc.py       # request cancellation, pinned apps, load-failure recovery
+uv run pytest tests/test_phase5_streaming.py  # WebSocket proxy + concurrent multi-app streaming
+uv run pytest tests/test_phase5_simulate.py   # scheduler simulation (what-if, no action)
+```

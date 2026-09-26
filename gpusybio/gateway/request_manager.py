@@ -142,6 +142,17 @@ class RequestManager:
         except (asyncio.TimeoutError, TimeoutError):
             return False
 
+    def is_terminal(self, request_id: str) -> bool:
+        """True if the request reached a terminal state (not forwardable)."""
+        try:
+            with self._db() as s:
+                row = s.get(Request, request_id)
+            return row is not None and row.status in (
+                "COMPLETED", "FAILED", "CANCELLED", "EXPIRED"
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
     def _app_limit(self, app_id: str) -> int:
         cfg = self._app_configs.get(app_id)
         if cfg is not None:
@@ -231,7 +242,9 @@ class RequestManager:
                 del self._active[app_id]
             if app_id:
                 self._states.request_finished(app_id)
-        self._forward.pop(request_id, None)
+        ev = self._forward.pop(request_id, None)
+        if ev is not None:
+            ev.set()  # wake the waiter: forward (scheduler) OR terminal (cancel/expire)
         if app_id and status == "COMPLETED":
             self._demand.service(app_id)  # spec 06 §6.4 (service rate = completions/min)
         await self._update_status(request_id, status, completed_at=True, error=error)
@@ -282,6 +295,8 @@ class RequestManager:
                     row.completed_at = now
                     if row.queued_at is not None:
                         row.queue_wait_sec = ((row.started_at or now) - row.queued_at).total_seconds()
+                    if row.started_at is not None:
+                        row.service_time_sec = (now - row.started_at).total_seconds()
                 if error:
                     row.error = error
         except Exception:  # noqa: BLE001
