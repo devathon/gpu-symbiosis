@@ -4,9 +4,17 @@ import { badge, Btn } from "./badges";
 export default function GatewayCards({
   gws,
   act,
+  onEdit,
+  onDelete,
+  onKeys,
+  onQueue,
 }: {
   gws: GwView[];
   act: (fn: () => Promise<void>) => void;
+  onEdit?: (g: GwView) => void;
+  onDelete?: (g: GwView) => void;
+  onKeys?: (g: GwView) => void;
+  onQueue?: (g: GwView) => void;
 }) {
   return (
     <section className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
@@ -25,7 +33,7 @@ export default function GatewayCards({
                 {g.queue.length > 0 && ` (oldest ${g.queue.oldest_wait_sec}s)`}
               </div>
             </div>
-            <div className="flex gap-1.5">
+            <div className="flex flex-wrap gap-1.5">
               {g.queue.length > 0 && <Btn label="Clear" onClick={() => act(() => api.gwClear(g.id))} />}
               <Btn
                 label="Process Now"
@@ -37,6 +45,17 @@ export default function GatewayCards({
               ) : (
                 <Btn label="Enable" onClick={() => act(() => api.gwEnable(g.id))} />
               )}
+              {onEdit && <Btn label="Edit" onClick={() => onEdit(g)} />}
+              {onDelete && (
+                <Btn
+                  label="Delete"
+                  onClick={() => {
+                    if (window.confirm(`Delete gateway ${g.name} (:${g.port})?`)) onDelete(g);
+                  }}
+                />
+              )}
+              {onKeys && <Btn label="Keys" onClick={() => onKeys(g)} />}
+              {onQueue && <Btn label="Queue" onClick={() => onQueue(g)} />}
             </div>
           </div>
         ))}

@@ -79,6 +79,22 @@ def _app_view(row: Application, state, resources) -> dict:
         "pinned": row.pinned,
         "consecutive_load_failures": row.consecutive_load_failures,
         "enabled": row.enabled,
+        # Form fields (spec 11 §2.3) — the edit view pre-fills from these.
+        "process_name": row.process_name,
+        "application_type": row.application_type,
+        "start_script": row.start_script,
+        "stop_script": row.stop_script,
+        "load_script": row.load_script,
+        "unload_script": row.unload_script,
+        "port": row.port,
+        "protocol": row.protocol,
+        "health_check_url": row.health_check_url,
+        "ready_check_url": row.ready_check_url,
+        "cpu_memory_required_mb": row.cpu_memory_required_mb,
+        "gpu_memory_safety_margin": row.gpu_memory_safety_margin,
+        "idle_unload_timeout_sec": row.idle_unload_timeout_sec,
+        "activity_detection_method": row.activity_detection_method,
+        "idle_threshold_gpu_pct": row.idle_threshold_gpu_pct,
     }
 
 
@@ -133,6 +149,8 @@ def make_admin_api(
     hub: SSEHub,
     idle_unloader=None,
     bus=None,
+    on_gateway_created=None,
+    on_gateway_removed=None,
 ) -> FastAPI:
     api = FastAPI(title="GPUSymbiosis", version="0.1.0")
 
@@ -167,6 +185,11 @@ def make_admin_api(
 
     def _csrf_from_request(request) -> str | None:
         return request.headers.get("x-csrf-token")
+
+    def _actor(request) -> str | None:
+        """Acting identity for audit (spec 12 §5); None in development mode."""
+        session = _session_from_request(request)
+        return session["username"] if session else None
 
     @api.middleware("http")
     async def _admin_auth(request, call_next):
@@ -220,6 +243,15 @@ def make_admin_api(
         if session is None:
             raise HTTPException(401, "not authenticated")
         return {"username": session["username"]}
+
+    @api.get("/api/auth/csrf")
+    async def csrf_token(request: Request):
+        # Returns the session's CSRF token so the UI can re-acquire it after a
+        # page reload (the double-submit token is session-scoped, spec 12 §3).
+        session = _session_from_request(request)
+        if session is None:
+            raise HTTPException(401, "not authenticated")
+        return {"csrf": session["csrf"]}
 
     @api.post("/api/auth/admins")
     async def create_admin_endpoint(body: AuthBody, request: Request):
@@ -287,7 +319,7 @@ def make_admin_api(
 
     # -- applications (spec 10 §1) -------------------------------------------
     @api.post("/api/applications", status_code=201)
-    def create_application(body: dict):
+    async def create_application(body: dict, request: Request):
         try:
             row = Application(id=body["id"], **{k: v for k, v in body.items() if k != "id"})
             with db() as s:
@@ -296,9 +328,10 @@ def make_admin_api(
             request_manager.app_configs().setdefault(
                 row.id, {"max_concurrent_requests": row.max_concurrent_requests}
             )
-            return {"id": row.id, "transition": None}
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, str(e))
+        await _audit("application_created", actor=_actor(request), detail=row.id)
+        return {"id": row.id, "transition": None}
 
     @api.get("/api/applications")
     def list_applications():
@@ -314,7 +347,7 @@ def make_admin_api(
         return _app_view(row, states.get(app_id), resources)
 
     @api.put("/api/applications/{app_id}")
-    def update_application(app_id: str, body: dict):
+    async def update_application(app_id: str, body: dict, request: Request):
         with db() as s:
             row = s.get(Application, app_id)
             if row is None:
@@ -326,25 +359,42 @@ def make_admin_api(
         request_manager.app_configs().update(
             {app_id: {"max_concurrent_requests": request_manager.app_configs()[app_id]["max_concurrent_requests"]}}
         )
+        await _audit("application_updated", actor=_actor(request), detail=app_id)
         return {"id": app_id, "transition": None}
 
     @api.delete("/api/applications/{app_id}", status_code=202)
-    def delete_application(app_id: str, confirm: bool = False):
+    async def delete_application(request: Request, app_id: str, confirm: bool = False):
         # Destructive action (spec 12 §3): Delete requires explicit confirmation.
         if not confirm:
             raise HTTPException(409, "delete requires confirm=true")
         s = states.get(app_id)
         if s.process.value != "STOPPED" or s.active_requests > 0:
             raise HTTPException(409, "application is not stopped")
+        from gpusybio.database.models import (
+            ApplicationEvent,
+            GatewayApiKey,
+            GatewayEvent,
+            Request as ReqModel,
+        )
+
         with db() as sess:
             row = sess.get(Application, app_id)
             if row is None:
                 raise HTTPException(404, "not found")
-            for g in row.gateways if hasattr(row, "gateways") else []:
-                sess.delete(g)
+            # Children first (PRAGMA foreign_keys=ON): gateways, their keys,
+            # events and all requests referencing this app.
+            gw_ids = [g.id for g in sess.query(Gateway).filter_by(application_id=app_id)]
+            if gw_ids:
+                for model, col in ((GatewayApiKey, "gateway_id"), (GatewayEvent, "gateway_id")):
+                    sess.query(model).filter(getattr(model, col).in_(gw_ids)).delete(synchronize_session=False)
+                sess.query(ReqModel).filter(ReqModel.gateway_id.in_(gw_ids)).delete(synchronize_session=False)
+                sess.query(Gateway).filter(Gateway.id.in_(gw_ids)).delete(synchronize_session=False)
+            sess.query(ApplicationEvent).filter_by(application_id=app_id).delete(synchronize_session=False)
+            sess.query(ReqModel).filter_by(application_id=app_id).delete(synchronize_session=False)
             sess.delete(row)
         apps._configs.pop(app_id, None)
         request_manager.app_configs().pop(app_id, None)
+        await _audit("application_deleted", actor=_actor(request), detail=app_id)
         return {"id": app_id, "transition": "deleted"}
 
     async def _transition(app_id: str, op: str, force: bool = False):
@@ -396,11 +446,14 @@ def make_admin_api(
         return await _transition(app_id, "start")
 
     @api.post("/api/applications/{app_id}/stop", status_code=202)
-    async def stop_application(app_id: str, force: bool = False, confirm: bool = False):
+    async def stop_application(request: Request, app_id: str, force: bool = False, confirm: bool = False):
         # Destructive action (spec 12 §3): a Force Stop requires explicit confirmation.
         if force and not confirm:
             raise HTTPException(409, "force stop requires confirm=true")
-        return await _transition(app_id, "stop", force)
+        result = await _transition(app_id, "stop", force)
+        if force:
+            await _audit("force_stop", actor=_actor(request), detail=app_id)
+        return result
 
     @api.post("/api/applications/{app_id}/load", status_code=202)
     async def load_application(app_id: str):
@@ -423,16 +476,20 @@ def make_admin_api(
         return {"id": app_id, "pinned": pinned}
 
     @api.post("/api/applications/{app_id}/pin")
-    def pin_application(app_id: str):
-        return _set_pinned(app_id, True)
+    async def pin_application(app_id: str, request: Request):
+        result = _set_pinned(app_id, True)
+        await _audit("app_pinned", actor=_actor(request), detail=app_id)
+        return result
 
     @api.post("/api/applications/{app_id}/unpin")
-    def unpin_application(app_id: str):
-        return _set_pinned(app_id, False)
+    async def unpin_application(app_id: str, request: Request):
+        result = _set_pinned(app_id, False)
+        await _audit("app_unpinned", actor=_actor(request), detail=app_id)
+        return result
 
     # -- request cancellation (spec 05 §6.3 / Phase 5) -------------------------
     @api.post("/api/requests/{request_id}/cancel", status_code=202)
-    async def cancel_request(request_id: str):
+    async def cancel_request(request_id: str, request: Request):
         from gpusybio.database.models import Request
 
         with db() as s:
@@ -442,28 +499,42 @@ def make_admin_api(
             terminal = row.status in ("COMPLETED", "FAILED", "CANCELLED", "EXPIRED")
         if not terminal:
             await request_manager.cancel(request_id)
+            await _audit("request_cancelled", actor=_actor(request), detail=request_id)
         return {"id": request_id, "cancelled": not terminal}
 
     # -- gateways (spec 10 §2) -------------------------------------------------
     @api.post("/api/gateways", status_code=201)
-    def create_gateway(body: GatewayIn):
+    async def create_gateway(body: GatewayIn, request: Request):
+        with db() as s:
+            if s.get(Application, body.application_id) is None:
+                raise HTTPException(400, f"application '{body.application_id}' not found")
+            if any(g.port == body.port for g in s.query(Gateway)):
+                raise HTTPException(409, f"port {body.port} already in use")
         row = Gateway(id=new_request_id().replace("req-", "gw-"), **body.model_dump())
         with db() as s:
             s.add(row)
-        request_manager.gateway_configs().update(
-            {row.id: {
-                "id": row.id,
-                "application_id": row.application_id,
-                "priority": row.priority,
-                "max_waiting_queue": row.max_waiting_queue,
-                "max_waiting_time_sec": row.max_waiting_time_sec,
-                "wait_timeout_policy": row.wait_timeout_policy,
-                "request_timeout_sec": row.request_timeout_sec,
-                "max_concurrent_requests": row.max_concurrent_requests,
-                "enabled": row.enabled,
-                "port": row.port,
-            }}
-        )
+        request_manager.set_gateway(row.id, {
+            "id": row.id,
+            "application_id": row.application_id,
+            "priority": row.priority,
+            "max_waiting_queue": row.max_waiting_queue,
+            "max_waiting_time_sec": row.max_waiting_time_sec,
+            "wait_timeout_policy": row.wait_timeout_policy,
+            "request_timeout_sec": row.request_timeout_sec,
+            "max_concurrent_requests": row.max_concurrent_requests,
+            "enabled": row.enabled,
+            "port": row.port,
+        })
+        if on_gateway_created is not None:
+            try:
+                await on_gateway_created(row.id)
+            except Exception as e:  # noqa: BLE001
+                # Roll back: the listener couldn't start (port conflict, …).
+                with db() as s:
+                    s.delete(s.get(Gateway, row.id))
+                request_manager.gateway_configs().pop(row.id, None)
+                raise HTTPException(409, f"could not start gateway listener: {e}")
+        await _audit("gateway_created", actor=_actor(request), detail=f"{row.id} :{row.port}")
         return {"id": row.id, "port": row.port}
 
     @api.get("/api/gateways")
@@ -472,32 +543,54 @@ def make_admin_api(
             return [_gw_view(g, request_manager, states) for g in s.query(Gateway)]
 
     @api.put("/api/gateways/{gw_id}")
-    def update_gateway(gw_id: str, body: dict):
+    async def update_gateway(gw_id: str, body: dict, request: Request):
         with db() as s:
             row = s.get(Gateway, gw_id)
             if row is None:
                 raise HTTPException(404, "not found")
+            if "application_id" in body and s.get(Application, body["application_id"]) is None:
+                raise HTTPException(400, f"application '{body['application_id']}' not found")
+            if "port" in body and any(
+                g.port == body["port"] and g.id != gw_id for g in s.query(Gateway)
+            ):
+                raise HTTPException(409, f"port {body['port']} already in use")
             for k, v in body.items():
                 if hasattr(row, k) and k != "id":
                     setattr(row, k, v)
-        gc = request_manager.gateway_configs().get(gw_id)
-        if gc is not None:
-            for k, v in body.items():
-                if k in gc:
-                    gc[k] = v
+        gc = request_manager.gateway(gw_id)
+        for k, v in body.items():
+            if k in gc:
+                gc[k] = v
+        # A port change re-spawns the listener live (spec 11 §3.2).
+        if "port" in body and on_gateway_created is not None:
+            await on_gateway_created(gw_id)
+        await _audit("gateway_updated", actor=_actor(request), detail=gw_id)
         return {"id": gw_id}
 
     @api.delete("/api/gateways/{gw_id}")
-    def delete_gateway(gw_id: str, confirm: bool = False):
+    async def delete_gateway(request: Request, gw_id: str, confirm: bool = False):
         # Destructive action (spec 12 §3): Delete requires explicit confirmation.
         if not confirm:
             raise HTTPException(409, "delete requires confirm=true")
+        from gpusybio.database.models import (
+            GatewayApiKey,
+            GatewayEvent,
+            Request as ReqModel,
+        )
+
         with db() as s:
             row = s.get(Gateway, gw_id)
             if row is None:
                 raise HTTPException(404, "not found")
+            # Children first (PRAGMA foreign_keys=ON).
+            s.query(GatewayApiKey).filter_by(gateway_id=gw_id).delete(synchronize_session=False)
+            s.query(GatewayEvent).filter_by(gateway_id=gw_id).delete(synchronize_session=False)
+            s.query(ReqModel).filter_by(gateway_id=gw_id).delete(synchronize_session=False)
             s.delete(row)
-        request_manager.gateway_configs().pop(gw_id, None)
+        request_manager.remove_gateway(gw_id)
+        if on_gateway_removed is not None:
+            await on_gateway_removed(gw_id)
+        await _audit("gateway_deleted", actor=_actor(request), detail=gw_id)
         return {"id": gw_id}
 
     @api.post("/api/gateways/{gw_id}/enable")
@@ -560,7 +653,7 @@ def make_admin_api(
         return {"id": gw_id}
 
     @api.post("/api/gateways/{gw_id}/clear-queue")
-    async def clear_queue(gw_id: str, confirm: bool = False):
+    async def clear_queue(request: Request, gw_id: str, confirm: bool = False):
         # Destructive action (spec 12 §3): Clear Queue requires explicit confirmation.
         if not confirm:
             raise HTTPException(409, "clear queue requires confirm=true")
@@ -569,7 +662,44 @@ def make_admin_api(
             request_manager._forward.pop(slot.request_id, None)
             request_manager._update_status(slot.request_id, "CANCELLED", completed_at=True,
                                            error="queue cleared")
+        await _audit("clear_queue", actor=_actor(request), detail=gw_id)
         return {"id": gw_id, "cancelled": len(slots)}
+
+    # -- queue request inspector (spec 11 §4) -------------------------------------
+    @api.get("/api/gateways/{gw_id}/queue")
+    def inspect_queue(gw_id: str):
+        from gpusybio.database.models import Request as ReqModel
+
+        slots = request_manager.queue().slots(gw_id)
+        with db() as s:
+            received = {r.id: r.received_at for r in s.query(ReqModel).all()
+                        if r.status == "QUEUED"}
+        return {
+            "gateway_id": gw_id,
+            "queue": [
+                {
+                    "request_id": slot.request_id,
+                    "priority": slot.priority,
+                    "queued_at": slot.queued_at,
+                    "waiting_sec": round(slot.waiting_sec, 1),
+                    "received_at": received.get(slot.request_id),
+                    "metadata": slot.metadata or {},
+                }
+                for slot in slots
+            ],
+        }
+
+    @api.post("/api/gateways/{gw_id}/queue/{request_id}/force")
+    async def force_queue_request(gw_id: str, request_id: str, request: Request):
+        # spec 11 §4: "force-process (raises to top of queue)". Queued only —
+        # never an active request.
+        slot = request_manager.queue().boost(request_id)
+        if slot is None:
+            raise HTTPException(404, "not queued")
+        if slot.gateway_id != gw_id:
+            raise HTTPException(400, "wrong gateway")
+        await _audit("force_queue", actor=_actor(request), detail=f"{gw_id}:{request_id}")
+        return {"id": request_id, "priority": slot.priority}
 
     # -- system / gpu / requests / events (spec 10 §3) ---------------------------
     @api.get("/api/system")

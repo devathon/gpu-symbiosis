@@ -61,6 +61,21 @@ class GatewayQueue:
             return 0.0
         return q[-1].waiting_sec if q else 0.0  # FIFO tail = oldest
 
+    def slots(self, gateway_id: str) -> list[RequestSlot]:
+        """Queued slots in service order (priority desc, FIFO by queued_at)."""
+        return list(self._queues.get(gateway_id, []))
+
+    def boost(self, request_id: str) -> RequestSlot | None:
+        """Raise a queued request to the top of its queue (spec 11 §4
+        'force-process'). Priority is set above the current queue max."""
+        slot = self._by_id.get(request_id)
+        if slot is None:
+            return None
+        q = self._queues.get(slot.gateway_id, [])
+        slot.priority = max([s.priority for s in q], default=slot.priority) + 1
+        q.sort(key=lambda s: (-s.priority, s.queued_at))
+        return slot
+
     def clear(self, gateway_id: str) -> list[RequestSlot]:
         """Cancel all queued requests (never active ones — spec 05 §10)."""
         q = self._queues.pop(gateway_id, [])

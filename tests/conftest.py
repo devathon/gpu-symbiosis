@@ -32,9 +32,15 @@ HERE = os.path.dirname(__file__)
 MOCK = os.path.join(HERE, "mock_gpu_app.py")
 PY = sys.executable
 
-A1_PORT, A2_PORT = 9501, 9502
-A1_GW, A2_GW = 9511, 9512
-ADMIN_PORT = 9530
+def _port_env(name: str, default: int) -> int:
+    return int(os.environ.get(name, default))
+
+
+# Ports are env-overridable (GSYBIO_*_PORT) so tests can run beside a dev
+# server that already holds the default 95xx ports.
+A1_PORT, A2_PORT = _port_env("GSYBIO_A1_PORT", 9501), _port_env("GSYBIO_A2_PORT", 9502)
+A1_GW, A2_GW = _port_env("GSYBIO_A1_GW", 9511), _port_env("GSYBIO_A2_GW", 9512)
+ADMIN_PORT = _port_env("GSYBIO_ADMIN_PORT", 9530)
 
 
 def build_app_spec(app_id, name, port, *, loaded=True, gpu_memory_mb=None, app_types=None):

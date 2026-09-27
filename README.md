@@ -337,3 +337,52 @@ uv run pytest tests/test_phase5_misc.py       # request cancellation, pinned app
 uv run pytest tests/test_phase5_streaming.py  # WebSocket proxy + concurrent multi-app streaming
 uv run pytest tests/test_phase5_simulate.py   # scheduler simulation (what-if, no action)
 ```
+
+## Implementation — Management UI (done)
+
+The Web UI now implements the management surface per
+[11 §2–§4](spec/11-web-ui.md#2-application-management-ui): the single-page
+dashboard is organised into three tabs — **Dashboard** (the existing live
+view), **Applications**, and **Gateways** — and the API is fully manageable
+from the UI.
+
+**Application management (11 §2).** The Applications tab lists all
+applications as cards with state-dependent actions (Start/Unload/Force
+Stop, Pin/Unpin) plus **Edit** and **Delete**. Create and edit use the same
+form, with the sections from [11 §2.3](spec/11-web-ui.md#23-add--edit-application):
+General (id, name, description, type), Process (name, start/stop scripts),
+Loading (load/unload scripts, auto-unload, idle timeout, activity detection,
+idle threshold), Network (port, protocol, health/ready check), Resource
+(GPU/CPU memory, safety margin), and a read-only Timing section. Editing is
+pre-filled from the current configuration; deleting is a confirmed destructive
+action (spec 12 §5) that removes the application's gateways and request
+history.
+
+**Gateway management (11 §3).** The Gateways tab lists gateways as cards
+with **Process Now**, **Disable/Enable**, **Edit**, **Delete**, plus
+**Keys** and **Queue** panels. Create and edit use the gateway form
+(routing: name, port, application, priority, enabled; queueing: max waiting
+queue, max wait time, wait-timeout policy, request timeout, max concurrent
+requests). Creating a gateway — and changing its port — brings up a live
+listener for that gateway immediately (the scheduler sees it via the request
+manager), and deleting one tears the listener down. Port conflicts and
+unknown applications are rejected with clear errors.
+
+**Queued Request Inspector (11 §4).** Each gateway card opens a live queue
+inspector (2 s polling): every queued request shows its id, priority, wait
+time, received time, and client metadata, with two actions — **Cancel**
+(queued only, confirmed) and **Force** (raises the request to the top of the
+queue; it is served next but never kills in-flight work, per
+[06 §9](spec/06-scheduler.md#9-priority-boost)).
+
+**API keys (12 §2).** Each gateway's **Keys** panel creates, lists, and
+deletes gateway API keys. A newly created key is shown in full exactly once
+("copy it now"); afterwards only the name and creation time are visible.
+
+**Auth (12 §3).** When no admin is configured the UI runs in open dev mode
+and skips the login screen. Once an admin exists, a login panel gates the
+UI: it authenticates via `POST /api/auth/login`, carries the session cookie,
+and attaches the double-submit CSRF token to every state-changing call.
+
+Covered by `tests/test_admin_ui.py` (queue inspector, live gateway lifecycle,
+application CRUD round-trip, auth + CSRF endpoints).

@@ -20,6 +20,7 @@ import pytest
 from conftest import (
     A1_GW,
     A2_GW,
+    ADMIN_PORT,
     _app_state,
     _decisions,
     _req_done,
@@ -27,8 +28,6 @@ from conftest import (
     _wait,
 )
 from gpusybio.config.models import SchedulerSpec
-
-ADMIN_PORT = 9530
 
 
 @pytest.fixture

@@ -8,9 +8,9 @@ once a key exists, a valid ``Authorization: Bearer <key>`` is required.
 from __future__ import annotations
 
 import httpx
-from conftest import ADMIN_PORT, _app_state, _req_done, _stream, _wait
+from conftest import A1_GW, ADMIN_PORT, _app_state, _req_done, _stream, _wait
 
-GW_PORT = 9511
+GW_PORT = A1_GW
 
 
 async def test_gateway_api_key_enforced(server):

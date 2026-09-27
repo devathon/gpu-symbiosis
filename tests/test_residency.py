@@ -14,7 +14,9 @@ import pytest
 from conftest import (
     ADMIN_PORT,
     A1_GW,
+    A1_PORT,
     A2_GW,
+    A2_PORT,
     _app_state,
     _req_done,
     _stream,
@@ -29,8 +31,8 @@ def cfg_overrides():
     return {
         "scheduler": SchedulerSpec(min_residency_sec=2.0),
         "applications": [
-            build_app_spec("a1", "qwen38", 9501, gpu_memory_mb=8192),
-            build_app_spec("a2", "llama31", 9502, gpu_memory_mb=8192),
+            build_app_spec("a1", "qwen38", A1_PORT, gpu_memory_mb=8192),
+            build_app_spec("a2", "llama31", A2_PORT, gpu_memory_mb=8192),
         ],
     }
 

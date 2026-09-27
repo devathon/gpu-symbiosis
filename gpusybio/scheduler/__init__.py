@@ -217,7 +217,7 @@ class Scheduler:
         """application_demand (spec 05 §9): the app's highest-scoring gateway;
         0 when idle (no queued requests)."""
         best: dict | None = None
-        for gid in self._gateway_ids:
+        for gid in self._rm.gateway_configs():
             if self._rm.gateway(gid)["application_id"] != app_id:
                 continue
             sc = self._gateway_score(gid)
@@ -226,10 +226,11 @@ class Scheduler:
         return best or {"score": 0.0}
 
     def _pick_candidate(self) -> tuple[dict, dict] | None:
-        """Candidate selection (spec 05 §9): argmax of gateway scores."""
+        """Candidate selection (spec 05 §9): argmax of gateway scores.
+        Gateway set is read live so API-created gateways are schedulable."""
         best_gw: str | None = None
         best_sc: dict | None = None
-        for gid in self._gateway_ids:
+        for gid in self._rm.gateway_configs():
             sc = self._gateway_score(gid)
             if sc is not None and (best_sc is None or sc["score"] > best_sc["score"]):
                 best_gw, best_sc = gid, sc
@@ -507,7 +508,7 @@ class Scheduler:
     def _unload_score(self, cfg: AppConfig) -> float:
         """spec 06 §3: highest unload score = lowest retention value."""
         d = self._rm.demand()
-        gws = [g for g in self._gateway_ids if self._rm.gateway(g)["application_id"] == cfg.id]
+        gws = [g for g in self._rm.gateway_configs() if self._rm.gateway(g)["application_id"] == cfg.id]
         nds = [
             normalized_demand(d.arrival_rate(g) / max(d.service_rate(cfg.id), EPS)) for g in gws
         ]

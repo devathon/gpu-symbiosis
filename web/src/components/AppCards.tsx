@@ -4,10 +4,19 @@ import { badge, Btn } from "./badges";
 export default function AppCards({
   apps,
   act,
+  onEdit,
+  onDelete,
 }: {
   apps: AppView[];
   act: (fn: () => Promise<void>) => void;
+  onEdit?: (a: AppView) => void;
+  onDelete?: (a: AppView) => void;
 }) {
+  const forceStop = (a: AppView) => {
+    if (!window.confirm(`Force-stop ${a.name}? Active requests will be dropped.`)) return;
+    act(() => api.appStop(a.id, true));
+  };
+
   return (
     <section className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
       <h2 className="mb-3 text-xs uppercase tracking-wider text-zinc-500">Applications</h2>
@@ -21,6 +30,7 @@ export default function AppCards({
                 {badge(a.residency_state)}
                 {a.pinned && <span className="rounded bg-purple-900/60 px-1.5 text-xs text-purple-300">pinned</span>}
                 {a.draining && <span className="rounded bg-amber-900/60 px-1.5 text-xs text-amber-300">draining</span>}
+                {!a.enabled && <span className="rounded bg-zinc-800 px-1.5 text-xs text-zinc-500">disabled</span>}
               </div>
               <div className="mt-1 text-xs text-zinc-500">
                 {a.gpu_memory_used_mb.toFixed(0)} MB VRAM · {a.active_requests} active · {a.queued_requests} queued
@@ -29,7 +39,7 @@ export default function AppCards({
                 )}
               </div>
             </div>
-            <div className="flex gap-1.5">
+            <div className="flex flex-wrap gap-1.5">
               {a.process_state === "RUNNING" ? (
                 a.supports_load_unload && a.residency_state === "LOADED" ? (
                   <Btn label="Unload" onClick={() => act(() => api.appUnload(a.id))} />
@@ -42,6 +52,22 @@ export default function AppCards({
               {a.process_state === "RUNNING" &&
                 a.supports_load_unload &&
                 a.residency_state !== "LOADED" && <Btn label="Load" onClick={() => act(() => api.appLoad(a.id))} />}
+              {a.process_state === "RUNNING" && <Btn label="Force Stop" title="Kill immediately, dropping active requests" onClick={() => forceStop(a)} />}
+              {a.pinned ? (
+                <Btn label="Unpin" onClick={() => act(() => api.appUnpin(a.id))} />
+              ) : (
+                <Btn label="Pin" title="Exclude from automatic unloading" onClick={() => act(() => api.appPin(a.id))} />
+              )}
+              {onEdit && <Btn label="Edit" onClick={() => onEdit(a)} />}
+              {onDelete && (
+                <Btn
+                  label="Delete"
+                  onClick={() => {
+                    if (window.confirm(`Delete ${a.id}? Its gateways and request history are removed.`))
+                      onDelete(a);
+                  }}
+                />
+              )}
             </div>
           </div>
         ))}
@@ -50,4 +76,3 @@ export default function AppCards({
     </section>
   );
 }
-

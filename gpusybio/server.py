@@ -96,11 +96,14 @@ class Server:
             default_idle_timeout_sec=float(config.settings.scheduler.idle_unload_timeout_sec),
             interval=float(config.settings.scheduler.idle_unload_interval_sec),
         )
+        self._gw_servers: dict[str, uvicorn.Server] = {}
         self.admin_api = make_admin_api(
             self.db, self.states, self.resources, self.request_manager,
             self.apps, self.scheduler, self.metrics, self.hub,
             idle_unloader=self.idle_unloader,
             bus=self.bus,
+            on_gateway_created=self._spawn_gateway,
+            on_gateway_removed=self._remove_gateway,
         )
         self._tasks: list[asyncio.Task] = []
         self._servers: list[uvicorn.Server] = []
@@ -123,6 +126,35 @@ class Server:
             gw, self.request_manager, self.session, self.states, app_view,
             verify_key=lambda presented: _verify_key(db, gw_id, presented),
         )
+
+    async def _spawn_gateway(self, gw_id: str) -> None:
+        """Spawn (or re-spawn on port change) a live gateway listener
+        (spec 11 §3.2 — API-created gateways serve immediately)."""
+        gw = self.request_manager.gateway(gw_id)
+        port = gw["port"]
+        import socket
+
+        # Mirror uvicorn's bind (SO_REUSEADDR) so a TIME_WAIT from a just-
+        # closed listener doesn't make the port look taken.
+        probe = socket.socket()
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError as e:
+            raise RuntimeError(f"port {port} is not available") from e
+        finally:
+            probe.close()
+        old = self._gw_servers.pop(gw_id, None)
+        if old is not None:
+            old.should_exit = True
+        server = await self._serve("127.0.0.1", port, self._gateway_app(gw_id))
+        self._gw_servers[gw_id] = server
+
+    async def _remove_gateway(self, gw_id: str) -> None:
+        """Close a gateway's live listener on deletion."""
+        old = self._gw_servers.pop(gw_id, None)
+        if old is not None:
+            old.should_exit = True
 
     # -- startup (spec 09 §8) --------------------------------------------------
     def _reconcile(self) -> None:

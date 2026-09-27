@@ -306,3 +306,31 @@ gateway; live-tail mode; full detail (JSON) on click.
 Edits all global configuration keys from [10 §6](10-api.md#6-global-configuration)
 with validation (e.g. reserve < total VRAM, margins ≥ 0) and a change audit trail
 in events.
+
+---
+
+## Implementation Status
+
+Implemented: the dashboard (§1, §5, §6) and the management surface (§2, §3, §4)
+are live in the single-page web UI, organised into **Dashboard / Applications /
+Gateways** tabs:
+
+- **§2 Application Management** — list as state-dependent cards (Start, Unload,
+  Force Stop [confirmed], Pin/Unpin, Edit, Delete [confirmed]); create/edit form
+  with the §2.3 sections (General / Process / Loading / Network / Resource,
+  read-only Timing). Deleting an application removes its gateways and request
+  history.
+- **§3 Gateway Management** — list as cards with Process Now (§3.2 boost, never
+  kills active work), Disable/Enable, Edit, Delete [confirmed]; create/edit form
+  (routing + queueing). Creating a gateway — and changing its port — starts a
+  live listener immediately; deleting one tears it down.
+- **§4 Queued Request Inspector** — per-gateway live queue (2 s polling):
+  request id, priority, wait, received, metadata; **Cancel** (queued only) and
+  **Force** (raise to top of queue; served next, never kills in-flight work).
+- **§12 §2 API keys** — per-gateway key management panel; a new key is shown in
+  full exactly once.
+- **§12 §3 auth** — open dev mode until the first admin exists; then a login
+  panel gates the UI, carrying the session cookie and the double-submit CSRF
+  token on every state-changing call.
+
+Not yet implemented: §7 Settings UI. Covered by `tests/test_admin_ui.py`.

@@ -62,6 +62,13 @@ class RequestManager:
     def gateway_configs(self) -> dict[str, dict]:
         return dict(self._gateways)
 
+    def set_gateway(self, gateway_id: str, cfg: dict) -> None:
+        """Install a gateway config live (API-created gateways, spec 11 §3)."""
+        self._gateways[gateway_id] = cfg
+
+    def remove_gateway(self, gateway_id: str) -> None:
+        self._gateways.pop(gateway_id, None)
+
     def app_configs(self) -> dict[str, dict]:
         return self._app_configs
 

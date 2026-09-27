@@ -4,6 +4,7 @@
 export interface AppView {
   id: string;
   name: string;
+  description: string | null;
   process_state: string;
   residency_state: string;
   state: string;
@@ -13,11 +14,32 @@ export interface AppView {
   queued_requests: number;
   gpu_memory_used_mb: number;
   gpu_memory_configured_mb: number;
+  gpu_memory_effective_mb: number;
+  startup_time_sec: number | null;
+  load_time_sec: number | null;
+  unload_time_sec: number | null;
+  stop_time_sec: number | null;
   supports_load_unload: boolean;
   allow_automatic_unload: boolean;
   pinned: boolean;
   consecutive_load_failures: number;
   enabled: boolean;
+  // form fields (spec 11 §2.3) — present for edit pre-fill
+  process_name: string | null;
+  application_type: string;
+  start_script: string;
+  stop_script: string | null;
+  load_script: string | null;
+  unload_script: string | null;
+  port: number;
+  protocol: string;
+  health_check_url: string | null;
+  ready_check_url: string | null;
+  cpu_memory_required_mb: number | null;
+  gpu_memory_safety_margin: number;
+  idle_unload_timeout_sec: number | null;
+  activity_detection_method: string;
+  idle_threshold_gpu_pct: number;
 }
 
 export interface GwView {
@@ -26,7 +48,10 @@ export interface GwView {
   port: number;
   application_id: string;
   priority: number;
+  max_waiting_queue: number;
+  max_waiting_time_sec: number;
   wait_timeout_policy: string;
+  request_timeout_sec: number | null;
   max_concurrent_requests: number;
   enabled: boolean;
   state: string;
@@ -164,17 +189,6 @@ export interface Decision {
   };
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-  return (await r.json()) as T;
-}
-
-async function post(url: string): Promise<void> {
-  const r = await fetch(url, { method: "POST" });
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-}
-
 export interface MetricItem {
   id: string;
   name: string;
@@ -205,6 +219,131 @@ export interface AppMetrics {
   spec: MetricItem[];
 }
 
+// -- queue inspector (spec 11 §4) ----------------------------------------------
+export interface QueueRow {
+  request_id: string;
+  priority: number;
+  queued_at: number;
+  waiting_sec: number;
+  received_at: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface KeyRow {
+  id: string;
+  name: string | null;
+  created_at: string | null;
+}
+
+// -- application form (spec 11 §2.3) ------------------------------------------
+export interface AppFormFields {
+  id: string;
+  name: string;
+  description: string;
+  application_type: string;
+  process_name: string;
+  start_script: string;
+  stop_script: string | null;
+  load_script: string | null;
+  unload_script: string | null;
+  port: number;
+  protocol: string;
+  health_check_url: string | null;
+  ready_check_url: string | null;
+  configured_gpu_memory_mb: number;
+  cpu_memory_required_mb: number | null;
+  gpu_memory_safety_margin: number;
+  supports_load_unload: boolean;
+  allow_automatic_unload: boolean;
+  idle_unload_timeout_sec: number | null;
+  activity_detection_method: string;
+  idle_threshold_gpu_pct: number;
+}
+
+// -- gateway form (spec 11 §3) --------------------------------------------------
+export interface GatewayFormFields {
+  name: string;
+  port: number;
+  application_id: string;
+  priority: number;
+  max_waiting_queue: number;
+  max_waiting_time_sec: number;
+  wait_timeout_policy: string;
+  request_timeout_sec: number | null;
+  max_concurrent_requests: number;
+  enabled: boolean;
+}
+
+// -- auth (spec 12 §3) ----------------------------------------------------------
+// Double-submit CSRF: the token travels in the X-CSRF-Token header on every
+// mutating request. It is session-scoped and re-acquired after a page reload.
+let _csrf: string | null = null;
+
+export function csrfToken(): string | null {
+  return _csrf;
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return (await r.json()) as T;
+}
+
+async function mut<T = void>(method: string, url: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (_csrf) headers["X-CSRF-Token"] = _csrf;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const r = await fetch(url, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  try {
+    return (await r.json()) as T;
+  } catch {
+    return undefined as T;
+  }
+}
+
+export async function initAuth(): Promise<{ mode: "dev" | "authed" | "login"; username?: string }> {
+  try {
+    const me = await fetch("/api/auth/me");
+    if (me.ok) {
+      const r = (await me.json()) as { username: string };
+      const c = (await (await fetch("/api/auth/csrf")).json()) as { csrf: string };
+      _csrf = c.csrf;
+      return { mode: "authed", username: r.username };
+    }
+  } catch {
+    // fall through
+  }
+  let admins: { admins: string[] } = { admins: [] };
+  try {
+    admins = await (await fetch("/api/auth/admins")).json();
+  } catch {
+    // no admin endpoint reachable → treat as dev
+  }
+  if (admins.admins?.length > 0) return { mode: "login" };
+  return { mode: "dev" };
+}
+
+export async function login(username: string, password: string): Promise<void> {
+  const r = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  const c = (await r.json()) as { csrf: string };
+  _csrf = c.csrf;
+}
+
+export async function logout(): Promise<void> {
+  await mut("POST", "/api/auth/logout");
+  _csrf = null;
+}
+
 export const api = {
   status: () => getJson<Status>("/api/status"),
   appMetrics: (id: string, window = "1h") =>
@@ -221,12 +360,44 @@ export const api = {
   events: (limit = 100) => getJson<EventRow[]>(`/api/events?limit=${limit}`),
   gpu: () => getJson<GpuSample>("/api/gpu"),
   decision: () => getJson<Decision>("/api/scheduler/current-decision"),
-  appStart: (id: string) => post(`/api/applications/${id}/start`),
-  appStop: (id: string) => post(`/api/applications/${id}/stop?force=true`),
-  appLoad: (id: string) => post(`/api/applications/${id}/load`),
-  appUnload: (id: string) => post(`/api/applications/${id}/unload`),
-  gwEnable: (id: string) => post(`/api/gateways/${id}/enable`),
-  gwDisable: (id: string) => post(`/api/gateways/${id}/disable`),
-  gwClear: (id: string) => post(`/api/gateways/${id}/clear-queue`),
-  gwProcessNow: (id: string) => post(`/api/gateways/${id}/process-now`),
+
+  // -- application lifecycle -------------------------------------------------
+  appStart: (id: string) => mut("POST", `/api/applications/${id}/start`),
+  appStop: (id: string, force = false) =>
+    mut("POST", `/api/applications/${id}/stop?force=${force}${force ? "&confirm=true" : ""}`),
+  appLoad: (id: string) => mut("POST", `/api/applications/${id}/load`),
+  appUnload: (id: string) => mut("POST", `/api/applications/${id}/unload`),
+  appPin: (id: string) => mut("POST", `/api/applications/${id}/pin`),
+  appUnpin: (id: string) => mut("POST", `/api/applications/${id}/unpin`),
+
+  // -- application CRUD (spec 11 §2) ------------------------------------------
+  appCreate: (fields: AppFormFields) => mut("POST", "/api/applications", fields),
+  appUpdate: (id: string, fields: Partial<AppFormFields>) =>
+    mut("PUT", `/api/applications/${id}`, fields),
+  appDelete: (id: string) => mut("DELETE", `/api/applications/${id}?confirm=true`),
+
+  // -- gateway lifecycle -------------------------------------------------------
+  gwEnable: (id: string) => mut("POST", `/api/gateways/${id}/enable`),
+  gwDisable: (id: string) => mut("POST", `/api/gateways/${id}/disable`),
+  gwClear: (id: string) => mut("POST", `/api/gateways/${id}/clear-queue?confirm=true`),
+  gwProcessNow: (id: string) => mut("POST", `/api/gateways/${id}/process-now`),
+
+  // -- gateway CRUD (spec 11 §3) -----------------------------------------------
+  gwCreate: (fields: GatewayFormFields) => mut("POST", "/api/gateways", fields),
+  gwUpdate: (id: string, fields: Partial<GatewayFormFields>) =>
+    mut("PUT", `/api/gateways/${id}`, fields),
+  gwDelete: (id: string) => mut("DELETE", `/api/gateways/${id}?confirm=true`),
+
+  // -- per-gateway API keys (spec 12 §2) ----------------------------------------
+  gwKeys: (id: string) => getJson<{ keys: KeyRow[] }>(`/api/gateways/${id}/keys`),
+  gwKeyCreate: (id: string, name: string) =>
+    mut<{ key: string }>("POST", `/api/gateways/${id}/keys?name=${encodeURIComponent(name)}`),
+  gwKeyDelete: (id: string, keyId: string) =>
+    mut("DELETE", `/api/gateways/${id}/keys/${keyId}`),
+
+  // -- queue request inspector (spec 11 §4) -------------------------------------
+  gwQueue: (id: string) => getJson<{ gateway_id: string; queue: QueueRow[] }>(`/api/gateways/${id}/queue`),
+  gwQueueForce: (id: string, requestId: string) =>
+    mut("POST", `/api/gateways/${id}/queue/${requestId}/force`),
+  reqCancel: (id: string) => mut("POST", `/api/requests/${id}/cancel`),
 };

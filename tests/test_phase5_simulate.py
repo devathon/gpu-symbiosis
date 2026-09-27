@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 
 import httpx
-from conftest import ADMIN_PORT, _app_state, _req_done, _wait
+from conftest import A2_GW, ADMIN_PORT, _app_state, _req_done, _wait
 
 
 async def test_simulate_does_not_act(server):
@@ -29,7 +29,7 @@ async def test_simulate_does_not_act(server):
     await _wait(a1_loaded, timeout=30)
     # Queue a request to a2's gateway → a2 becomes the candidate (queued, no fit).
     task = asyncio.create_task(
-        c.post("http://127.0.0.1:9512/generate", json={"chunks": 3, "delay": 0.1})
+        c.post(f"http://127.0.0.1:{A2_GW}/generate", json={"chunks": 3, "delay": 0.1})
     )
     await _wait(lambda: _req_done(c, "QUEUED", "gw-a2"), timeout=10)
     queued = [r for r in (await c.get(f"{admin}/api/requests?gateway_id=gw-a2")).json()

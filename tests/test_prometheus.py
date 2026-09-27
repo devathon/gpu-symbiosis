@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import httpx
-from conftest import ADMIN_PORT, _app_state, _req_done, _stream, _wait
+from conftest import A1_GW, ADMIN_PORT, _app_state, _req_done, _stream, _wait
 
 
 async def test_prometheus_endpoint(server):
@@ -19,7 +19,7 @@ async def test_prometheus_endpoint(server):
         return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
 
     await _wait(a1_loaded, timeout=30)
-    text = await _stream(c, f"http://127.0.0.1:9511/generate", {"chunks": 4, "delay": 0.02})
+    text = await _stream(c, f"http://127.0.0.1:{A1_GW}/generate", {"chunks": 4, "delay": 0.02})
     assert text
     await _wait(lambda: _req_done(c, "COMPLETED", "gw-a1"), timeout=20)
     # Let the 1s sampler tick so current() has data.
@@ -59,7 +59,7 @@ async def test_prometheus_request_duration(server):
         return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
 
     await _wait(a1_loaded, timeout=30)
-    text = await _stream(c, f"http://127.0.0.1:9511/generate", {"chunks": 6, "delay": 0.03})
+    text = await _stream(c, f"http://127.0.0.1:{A1_GW}/generate", {"chunks": 6, "delay": 0.03})
     assert text
     await _wait(lambda: _req_done(c, "COMPLETED", "gw-a1"), timeout=20)
     await asyncio.sleep(2.0)

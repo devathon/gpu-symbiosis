@@ -13,7 +13,7 @@ import time
 
 import httpx
 import pytest
-from conftest import ADMIN_PORT, _app_state, _req_done, _stream
+from conftest import A1_GW, ADMIN_PORT, _app_state, _req_done, _stream
 
 from gpusybio.applications.lifecycle import ProcessState, ResidencyState
 from gpusybio.events.bus import EventBus, IDLE_TIMEOUT
@@ -279,7 +279,7 @@ async def test_auto_unload_idle_then_reserve(server):
     assert off, f"a1 was not auto-unloaded (state={st})"
 
     # 3. A request to gw-a1 should queue, re-load a1, and be served.
-    text = await _stream(c, f"http://127.0.0.1:9511/generate", {"chunks": 4, "delay": 0.02})
+    text = await _stream(c, f"http://127.0.0.1:{A1_GW}/generate", {"chunks": 4, "delay": 0.02})
     assert text
     await _wait(lambda: _req_done(c, "COMPLETED", "gw-a1"), timeout=30)
     await c.aclose()

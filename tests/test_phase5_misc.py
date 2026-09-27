@@ -14,7 +14,7 @@ import asyncio
 import time
 
 import httpx
-from conftest import ADMIN_PORT, _app_state, _req_done, _wait
+from conftest import A1_GW, ADMIN_PORT, _app_state, _req_done, _wait
 
 
 async def test_pinned_app_excluded_from_unload(server):
@@ -55,7 +55,7 @@ async def test_cancel_queued_request(server):
     await _wait(a1_loaded, timeout=30)
     # max_concurrent_requests=1: a long request occupies the slot, a second queues.
     task_a = asyncio.create_task(
-        c.post("http://127.0.0.1:9511/generate", json={"chunks": 20, "delay": 0.3})
+        c.post(f"http://127.0.0.1:{A1_GW}/generate", json={"chunks": 20, "delay": 0.3})
     )
     # Wait until request A is active (occupying the slot, not completed/queued).
     async def a1_active():
@@ -64,7 +64,7 @@ async def test_cancel_queued_request(server):
     await _wait(a1_active, timeout=10)
     # Request B now queues (slot busy).
     task_b = asyncio.create_task(
-        c.post("http://127.0.0.1:9511/generate", json={"chunks": 2, "delay": 0.1})
+        c.post(f"http://127.0.0.1:{A1_GW}/generate", json={"chunks": 2, "delay": 0.1})
     )
     await _wait(lambda: _req_done(c, "QUEUED", "gw-a1"), timeout=10)
     reqs = (await c.get(f"{admin}/api/requests?gateway_id=gw-a1")).json()
@@ -97,7 +97,7 @@ async def test_cancel_processing_request(server):
     await _wait(a1_loaded, timeout=30)
     # Start a long request in the background (it becomes ACTIVE/processing).
     task = asyncio.create_task(
-        c.post("http://127.0.0.1:9511/generate", json={"chunks": 20, "delay": 0.3})
+        c.post(f"http://127.0.0.1:{A1_GW}/generate", json={"chunks": 20, "delay": 0.3})
     )
     # Wait until the request is active (occupying the slot).
     async def active_now():
