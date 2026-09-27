@@ -4,6 +4,11 @@
 # scripts at your real inference servers (llama-server, ollama, ComfyUI, ...).
 
 db_path: /tmp/gpusybio-dev.db
+# Global data path: app log at <data_path>/logs/<id>.log (the app's stdout),
+# pid at <data_path>/pids/<id>.pid. Scripts see GPUSYB_DATA_PATH / GPUSYB_LOG /
+# GPUSYB_PID_FILE (spec 03 §2.5). Token metrics are parsed from the app's log
+# (spec 08 §5) — a real llama-server logs per-request token counts + speed.
+data_path: /tmp/gpusybio-dev
 admin_host: 127.0.0.1
 admin_port: 9530
 
@@ -16,17 +21,27 @@ settings:
   log_level: INFO
 
 applications:
+  # Seed semantics (spec 16 §2.6): the seed creates missing rows only.
+  # `update: true` on a spec opts it into update-on-start for existing DB rows
+  # (this dev config wants YAML edits to sync across restarts). Without the
+  # flag, changes made via the API/UI survive a restart.
   - id: a1
     name: qwen38
     application_type: llama
     port: 9501
-    # Mock app (tests/mock_gpu_app.py). For a real server, replace with e.g.:
-    #   start_script: "nohup llama-server -m qwen38.gguf --port 9501 >/tmp/a1.log 2>&1 & echo $! >/tmp/a1.pid"
-    #   stop_script:  "kill $(cat /tmp/a1.pid) 2>/dev/null; sleep 0.5; true"
+    update: true
+    # Mock app (tests/mock_gpu_app.py). The app's stdout is the log: redirect it
+    # to $GPUSYB_LOG and the pid to $GPUSYB_PID_FILE (the data-path convention).
+    # For a real server, replace with e.g.:
+    #   start_script: "mkdir -p \"$GPUSYB_DATA_PATH/logs\" \"$GPUSYB_DATA_PATH/pids\"
+    #                  nohup llama-server -m qwen38.gguf --port 9501 >$GPUSYB_LOG 2>&1 &
+    #                  echo $! >$GPUSYB_PID_FILE; sleep 0.2; echo $(cat $GPUSYB_PID_FILE)"
+    #   stop_script:  "kill $(cat $GPUSYB_PID_FILE) 2>/dev/null; sleep 0.5; true"
     start_script: >
+      mkdir -p "$GPUSYB_DATA_PATH/logs" "$GPUSYB_DATA_PATH/pids";
       nohup python tests/mock_gpu_app.py --port 9501 --name qwen38 --start-loaded
-      >/tmp/gpusybio-a1.log 2>&1 & echo $! >/tmp/gpusybio-a1.pid; sleep 0.2; echo $(cat /tmp/gpusybio-a1.pid)
-    stop_script: "kill $(cat /tmp/gpusybio-a1.pid) 2>/dev/null; sleep 0.3; true"
+      >"$GPUSYB_LOG" 2>&1 & echo $! >"$GPUSYB_PID_FILE"; sleep 0.2; echo $(cat "$GPUSYB_PID_FILE")
+    stop_script: 'kill $(cat "$GPUSYB_PID_FILE") 2>/dev/null; sleep 0.3; true'
     load_script: "curl -s -X POST http://127.0.0.1:9501/load"
     unload_script: "curl -s -X POST http://127.0.0.1:9501/unload"
     health_check_url: http://127.0.0.1:9501/health
@@ -38,10 +53,12 @@ applications:
     name: llama31
     application_type: llama
     port: 9502
+    update: true
     start_script: >
+      mkdir -p "$GPUSYB_DATA_PATH/logs" "$GPUSYB_DATA_PATH/pids";
       nohup python tests/mock_gpu_app.py --port 9502 --name llama31 --start-loaded
-      >/tmp/gpusybio-a2.log 2>&1 & echo $! >/tmp/gpusybio-a2.pid; sleep 0.2; echo $(cat /tmp/gpusybio-a2.pid)
-    stop_script: "kill $(cat /tmp/gpusybio-a2.pid) 2>/dev/null; sleep 0.3; true"
+      >"$GPUSYB_LOG" 2>&1 & echo $! >"$GPUSYB_PID_FILE"; sleep 0.2; echo $(cat "$GPUSYB_PID_FILE")
+    stop_script: 'kill $(cat "$GPUSYB_PID_FILE") 2>/dev/null; sleep 0.3; true'
     load_script: "curl -s -X POST http://127.0.0.1:9502/load"
     unload_script: "curl -s -X POST http://127.0.0.1:9502/unload"
     health_check_url: http://127.0.0.1:9502/health
@@ -56,6 +73,7 @@ gateways:
     application_id: a1
     priority: 10
     max_concurrent_requests: 1
+    update: true
 
   - id: gw-a2
     name: gw-a2
@@ -63,3 +81,4 @@ gateways:
     application_id: a2
     priority: 5
     max_concurrent_requests: 1
+    update: true

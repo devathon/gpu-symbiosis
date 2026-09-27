@@ -573,7 +573,8 @@ application pair.
 ```text
 Candidate selected
        ↓
-Stop accepting new requests for current app
+Queue new requests for current app (§2: new requests queue,
+existing continue — the drain is never cancelled or delayed)
        ↓
 Current app → DRAINING
        ↓

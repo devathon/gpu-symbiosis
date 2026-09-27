@@ -2,8 +2,9 @@
 
 Covers: minimum residency deferral (spec 06 §12), switch margin (spec 06 §13),
 emergency override (spec 06 §15), Process Now boost (spec 06 §9), switch
-cooldown anti-thrash (spec 06 §16), and the admin over-allocation 409
-(Invariant 2, spec 14).
+cooldown anti-thrash (spec 06 §16), drain queueing (spec 06 §2: new requests
+for a draining app queue — never dropped, never cancel or delay the drain),
+and the admin over-allocation 409 (Invariant 2, spec 14).
 
 Each test builds its own server with explicit scheduler knobs (fixture
 setup runs before the test body, so knobs cannot be set in-test via a
@@ -290,5 +291,58 @@ async def test_admin_start_rejects_overallocation():
             # A2 untouched by the rejected transition.
             st2 = await _app_state(c, "a2")
             assert st2["process_state"] != "RUNNING"
+    finally:
+        await _stop_server(srv, task)
+
+
+async def test_new_request_queues_during_drain():
+    """spec 06 §2: new requests for a DRAINING (still resident) app QUEUE —
+    never dropped, and they never cancel or delay the drain. Once A1's active
+    work is done the drain completes (A1 unloads, A2 loads and is served); the
+    queued A1 request is then served when the scheduler rotates back to A1.
+    No starvation: the candidate the drain was made for always gets its turn."""
+    srv, task = await _start_server(SchedulerSpec(min_residency_sec=0, switch_margin=1))
+    try:
+        async with httpx.AsyncClient() as c:
+            await _a1_resident(c)
+
+            # A1 busy (~2 s); an A2 request marks A1 as DRAINING.
+            a1_task = asyncio.create_task(_stream(c, f"http://127.0.0.1:{A1_GW}/generate",
+                                                  {"chunks": 8, "delay": 0.25}))
+            await asyncio.sleep(0.3)
+            a2_task = asyncio.create_task(c.post(f"http://127.0.0.1:{A2_GW}/generate",
+                                                 json={"chunks": 3, "delay": 0.05}, timeout=60.0))
+
+            async def draining():
+                return (await _app_state(c, "a1"))["draining"] is True
+
+            await _wait(draining, timeout=10)
+
+            # A new request for the DRAINING app: accepted and queued — the
+            # drain is NOT cancelled (A1 stays DRAINING while its work runs).
+            new_a1 = asyncio.create_task(c.post(f"http://127.0.0.1:{A1_GW}/generate",
+                                                json={"chunks": 3, "delay": 0.05}, timeout=60))
+            await asyncio.sleep(0.5)  # let it queue (A1 is still busy)
+            st1 = await _app_state(c, "a1")
+            assert st1["draining"] is True, st1
+            assert st1["queued_requests"] >= 1, st1
+
+            # A1's in-flight work finishes → the drain completes (not
+            # cancelled): A1 unloads, A2 loads and its request is served.
+            async def a2_loaded():
+                return (await _app_state(c, "a2"))["residency_state"] == "LOADED"
+
+            await _wait(a2_loaded, timeout=20)
+            st1 = await _app_state(c, "a1")
+            assert st1["draining"] is False, st1
+            assert st1["residency_state"] != "LOADED", st1
+            r2 = await a2_task
+            assert r2.status_code == 200 and "llama31" in r2.text
+
+            # The queued A1 request was not cancelled: it is served when the
+            # scheduler rotates back to A1 (its demand now wins).
+            r1 = await new_a1
+            assert r1.status_code == 200 and "qwen38" in r1.text
+            await a1_task
     finally:
         await _stop_server(srv, task)

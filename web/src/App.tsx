@@ -9,7 +9,6 @@ import QueueInspector from "./components/QueueInspector";
 import EventFeed from "./components/EventFeed";
 import RequestsTable from "./components/RequestsTable";
 import GpuChart from "./components/GpuChart";
-import SchedulerExplainer from "./components/SchedulerExplainer";
 import MetricsPanel from "./components/MetricsPanel";
 import AuthPanel from "./components/AuthPanel";
 
@@ -35,7 +34,7 @@ export default function App() {
   const [requests, setRequests] = useState<RequestRow[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [decision, setDecision] = useState<Decision>({});
-  const [samples, setSamples] = useState<{ t: number; vram: number; gpu: number }[]>([]);
+  const [samples, setSamples] = useState<{ t: number; vram: number; gpu: number; temp: number | null }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const sseRef = useRef<EventSource | null>(null);
 
@@ -77,7 +76,7 @@ export default function App() {
         if (live) {
           setSamples((prev) => [
             ...prev.slice(-(MAX_SAMPLES - 1)),
-            { t: Date.now(), vram: g.vram_pct, gpu: g.gpu_pct },
+            { t: Date.now(), vram: g.vram_pct, gpu: g.gpu_pct, temp: g.temperature_c },
           ]);
         }
       } catch {
@@ -191,8 +190,8 @@ export default function App() {
                 <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-400">
                   <span className="font-medium text-zinc-200">{res.name || "GPU"}</span>
                   {res.pcie && <span className="text-zinc-500">{res.pcie}</span>}
-                  <span>Rx: {fmtRate(res.rx_mbps)}</span>
-                  <span>Tx: {fmtRate(res.tx_mbps)}</span>
+                  <span className="tabular-nums">Rx: {fmtRate(res.rx_mbps)}</span>
+                  <span className="tabular-nums">Tx: {fmtRate(res.tx_mbps)}</span>
                   <span>
                     Pow: {fmtPow(res.power_w, res.power_limit_w)}
                   </span>
@@ -233,11 +232,7 @@ export default function App() {
 
               <div className="mb-6 grid gap-4 lg:grid-cols-2">
                 <AppCards apps={apps} act={act} />
-                <GatewayCards gws={gws} act={act} />
-              </div>
-
-              <div className="mb-6">
-                <SchedulerExplainer d={decision} />
+                <GatewayCards gws={gws} act={act} decision={decision} />
               </div>
 
               <div className="mb-6">
@@ -319,6 +314,7 @@ export default function App() {
               <GatewayCards
                 gws={gws}
                 act={act}
+                decision={decision}
                 onEdit={(g) => {
                   setEditingGw(g);
                   setShowGwForm(true);
@@ -392,7 +388,27 @@ const Widget = ({
   </div>
 );
 
-const fmtRate = (mbps: number | null) => (mbps == null ? "—" : mbps >= 1 ? `${mbps.toFixed(1)} MB/s` : `${(mbps * 1024).toFixed(0)} KB/s`);
+// Unit-aware with 4 significant digits: "0.000 Kb/s", "12.00 Kb/s",
+// "1.123 Mb/s", "23.00 Mb/s", "999.0 Mb/s", "23.00 Gb/s".
+const fmtRate = (mbps: number | null) => {
+  if (mbps == null) return "—";
+  const v = Math.abs(mbps);
+  let val: number;
+  let unit: string;
+  if (v < 1) {
+    val = v * 1000;
+    unit = "Kb/s";
+  } else if (v < 1000) {
+    val = v;
+    unit = "Mb/s";
+  } else {
+    val = v / 1000;
+    unit = "Gb/s";
+  }
+  const digits = val > 0 ? Math.floor(Math.log10(val)) : -3;
+  const decimals = Math.min(3, Math.max(0, 3 - digits));
+  return `${val.toFixed(decimals)} ${unit}`;
+};
 
 const fmtPow = (w: number | null, limit: number | null) => {
   if (w == null) return "—";

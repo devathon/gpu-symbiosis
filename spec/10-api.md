@@ -289,6 +289,7 @@ gateways:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
+| `data_path` | `~/.gpusybio` (or derived from `db_path`) | global data path: app log at `<data_path>/logs/<id>.log` (the app's stdout), pid at `<data_path>/pids/<id>.pid`; scripts see `GPUSYB_DATA_PATH` / `GPUSYB_LOG` / `GPUSYB_PID_FILE` (03 §2.5) |
 | `gpu.memory_reserve_mb` | 2048 | VRAM never planned for apps |
 | `gpu.memory_safety_margin` | 0.10 | required = effective × (1 + margin) |
 | `scheduler.interval_ms` | 1000 | reconciliation loop period |
@@ -306,3 +307,12 @@ gateways:
 | `load.retry_delay_sec` | 10 | delay between retries |
 | `load.max_consecutive_failures` | 3 | then FAULTED |
 | `startup.max_detection_sec` | 60 | ready-detection cap |
+
+### 6.1 Seed Control (spec 16 §2.6)
+
+Per-application and per-gateway seed flags — not global settings:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `applications[].update` | `false` | update the existing DB row at startup; if `false` the seed creates missing rows only, so `PUT /api/*` changes survive a restart |
+| `gateways[].update` | `false` | same, for gateways |

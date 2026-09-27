@@ -149,6 +149,13 @@ then follows the order in
 3. **Eviction path** — a victim is selected (spec 06 §3); a *busy* victim is
    **drained, not killed**: it is marked DRAINING and the switch completes only
    after its active requests finish ([06 §17](spec/06-scheduler.md)).
+   New requests that arrive for a draining app **queue** — they are never
+   dropped, and they never cancel or delay the drain ([06 §2](spec/06-scheduler.md)):
+   a stream of new requests can't hold the drain open indefinitely, so the
+   candidate it exists to serve can't starve. The switch completes the moment
+   the draining app's active work is done; the queued request is then served
+   when the app is resident again (the scheduler rotates back when its demand
+   wins) or it times out per the gateway's wait policy.
 
 Guards and controls:
 
@@ -166,10 +173,15 @@ Guards and controls:
   boost for one gateway; it changes which request is picked next but never
   kills in-flight work.
 
-The **Scheduler Explainer** panel (spec 11 §5) shows why the current decision
-was made: score breakdown, switching penalty, effective vs current score, the
-next-switch threshold, VRAM accounting, residents, guard state, and switch
-history — backed by `GET /api/scheduler/current-decision`.
+The scheduler is explained **on the gateways themselves** (spec 11 §5) rather
+than in a separate explainer panel — active / candidate / resident apps are
+already visible in the Applications section. Each gateway card shows its live
+**scheduler score**; hovering the score reveals the breakup (priority, priority /
+backlog / waiting / recent-demand pressures, the demand ratio). When that gateway
+is the current candidate, the hover also shows the switching penalty, the
+effective score (score − penalty) and the decision. The score comes from
+`GET /api/status` (`gateways[id].score`); the candidate context and switch
+tracking come from `GET /api/scheduler/current-decision`.
 
 **Over-allocation is now rejected.** Admin `start`/`load` enforce Invariant 2
 (never exceed the VRAM budget): if an app's required VRAM (incl. safety
@@ -177,6 +189,41 @@ margin) doesn't fit alongside the current residents, the transition returns
 **409** with `{required_mb, free_mb, residents}`. An already-resident app is
 never blocked (the zero-cost path adds no VRAM). This closes the Phase 1 loose
 end where a manual `start`/`load` could silently over-commit the GPU.
+
+**All knobs are config-driven** — set them under `settings.scheduler` in
+`config.yaml` (defaults shown; omit the section to use them all):
+
+```yaml
+settings:
+  scheduler:
+    interval_ms: 1000              # reconciliation tick
+    min_residency_sec: 30          # §12 young-resident guard
+    switch_margin: 5               # §13 score margin before a switch
+    switch_cost_weight: 1          # §13 switching-cost penalty weight
+    emergency_wait_sec: 300        # §15 wait that overrides min residency
+    emergency_queue_threshold: null# §15 queue size that overrides min residency
+    switch_cooldown_sec: 0         # §16 anti-thrash window for the same pair
+    process_now_multiplier: 2      # §9 Process Now priority boost
+    process_now_boost_ttl_sec: 120 # §9 boost decay window
+    idle_unload_timeout_sec: 300   # §10 idle → auto-unload window
+    idle_unload_interval_sec: 5    # §10 idle-detection tick
+```
+
+Related knobs: `settings.gpu` (backend, `memory_reserve_mb`,
+`memory_safety_margin`), `settings.metrics.interval_sec`, `settings.queue`,
+`settings.requests.default_request_timeout_sec`, `settings.load`,
+`settings.startup.max_detection_sec`, the top-level `data_path` (global — the
+app log at `<data_path>/logs/<id>.log` is the app's stdout; the pid at
+`<data_path>/pids/<id>.pid`; scripts see `GPUSYB_DATA_PATH` / `GPUSYB_LOG` /
+`GPUSYB_PID_FILE`), and per-application / per-gateway fields
+(e.g. `max_concurrent_requests`, `request_timeout_sec`, `wait_timeout_policy`).
+
+**Seed semantics (spec 16 §2.6).** `config.yaml` is a seed: on startup it
+**creates missing application/gateway rows only**. An existing DB row is
+updated only if that spec sets `update: true`; without the flag, changes made
+through the API/UI survive a restart. The seed never deletes rows. Settings are
+different — the seed always overwrites them (there is no settings API, so the
+YAML is the only way to change a setting).
 
 ### Tests
 
@@ -211,9 +258,15 @@ service rate (completed/min), and rolling last-1m/5m/15m counts.
 **Type-metrics contract (08 §5/§9).** Each application type declares a
 **TypeSpec** — a list of `MetricDef`s (id, name, unit, kind, display,
 collection source, aggregation). Built-in specs exist for llama/ollama
-(token counts, tokens/sec, prompt & generation tok/s, request counts, via a
-`/stats` poll), ComfyUI, TTS, and a generic fallback that works for every
-application. The metrics API
+(token counts, tokens/sec, prompt & generation tok/s, request counts),
+ComfyUI, TTS, and a generic fallback that works for every application.
+Token metrics for a `llama` application are parsed from the **application log**
+(the app's stdout, redirected to `<data_path>/logs/<id>.log` by the start
+script): a real `llama-server` has no cumulative token endpoint, but it logs
+the per-request token counts and speeds, which the metrics handler tails
+(08 §5). Apps with a `/stats` endpoint still work (first non-zero source wins),
+and the gateway also records per-request tokens from the upstream response
+headers (`X-Input-Tokens` / `X-Output-Tokens`). The metrics API
 (`GET /api/applications/{id}/metrics?window=`) returns the live values for the
 application's spec plus the common metrics (requests, latency percentiles,
 wait/service), and the **Web UI auto-renders the panel from the spec** — so a
@@ -262,6 +315,20 @@ pinned (automatic path), plus a minimum-residency guard and a pending-demand
 suppression (queued requests or recent arrivals). The unload publishes an
 `IDLE_TIMEOUT` event then drives the normal unload lifecycle (so a subsequent
 request reloads and serves it).
+
+**Unload is driven by the unload script.** An app is *unloadable* iff it has an
+**unload script** — the process stays up and the model is released (fast,
+re-loadable). The **load script is optional**: if it is absent, an unloaded app
+resumes serving immediately (no load step). An app with no unload script cannot
+be unloaded (the process *is* the model), so it is **stopped directly** (kill
+the process). The "release VRAM" step used by both the idle unloader and the
+eviction path routes through `ApplicationManager.release()`: it **unloads**
+apps that have an unload script and **stops** the rest. In the UI, an unloadable
+app offers both an **Unload** and a **Stop** button (Stop is the direct-kill
+path, always available); a non-unloadable app offers only **Stop**. The manual
+`POST /api/applications/{id}/unload` is rejected (400) for apps without an
+unload script — stop it instead. Load/unload only work for a **started**
+(running) app.
 
 **Application retention scoring (06 §3).** Unload-candidate selection scores
 residents by `unload_score = idle_pressure + low_demand_pressure +

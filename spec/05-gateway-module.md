@@ -158,10 +158,15 @@ completed_at
 priority            effective (may be escalated per §4)
 status
 client_metadata     opaque, echoed/recorded as configured
-input_tokens
-output_tokens
+input_tokens        from the upstream response headers (X-Input-Tokens)
+output_tokens       from the upstream response headers (X-Output-Tokens)
 error
 ```
+
+`input_tokens` / `output_tokens` are captured from the upstream response headers
+(`X-Input-Tokens` / `X-Output-Tokens`) when the gateway completes a request, and
+feed the per-request token sums in [08 §9.2](08-metrics-module.md). They are a
+complementary source: the app's log (§5) is the primary token-metrics source.
 
 ### 6.2 Request States
 

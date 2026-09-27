@@ -44,20 +44,24 @@ ADMIN_PORT = _port_env("GSYBIO_ADMIN_PORT", 9530)
 
 
 def build_app_spec(app_id, name, port, *, loaded=True, gpu_memory_mb=None, app_types=None):
-    """Build an ApplicationSpec for a mock GPU app (reusable by test modules)."""
-    pidfile = f"/tmp/gpusybio-{app_id}.pid"
-    log = f"/tmp/gpusybio-{app_id}.log"
+    """Build an ApplicationSpec for a mock GPU app (reusable by test modules).
+
+    The app's stdout is the log: the start script redirects it to ``$GPUSYB_LOG``
+    and the pid to ``$GPUSYB_PID_FILE`` (the data-path convention, spec 03 §2.5).
+    The manager sets those env vars from the global data path.
+    """
     if gpu_memory_mb is None:
         gpu_memory_mb = 18432 if app_id == "a1" else 12288
     return ApplicationSpec(
         id=app_id,
         name=name,
         start_script=(
+            'mkdir -p "$GPUSYB_DATA_PATH/logs" "$GPUSYB_DATA_PATH/pids"; '
             f"nohup {PY} {MOCK} --port {port} --name {name}"
             + (" --start-loaded" if loaded else "")
-            + f" >{log} 2>&1 & echo $! > {pidfile}; sleep 0.2; echo $(cat {pidfile})"
+            + ' >"$GPUSYB_LOG" 2>&1 & echo $! >"$GPUSYB_PID_FILE"; sleep 0.2; echo $(cat "$GPUSYB_PID_FILE")'
         ),
-        stop_script=f"kill $(cat {pidfile}) 2>/dev/null; sleep 0.3; true",
+        stop_script='kill $(cat "$GPUSYB_PID_FILE") 2>/dev/null; sleep 0.3; true',
         load_script=f"curl -s -X POST http://127.0.0.1:{port}/load",
         unload_script=f"curl -s -X POST http://127.0.0.1:{port}/unload",
         port=port,
@@ -76,6 +80,14 @@ def make_config(
     tmp = f"/tmp/gpusybio-e2e-{os.getpid()}.db"
     if os.path.exists(tmp):
         os.unlink(tmp)
+    data_path = f"/tmp/gpusybio-e2e-data-{os.getpid()}"
+    for sub in ("", "/logs", "/pids"):
+        for f in (
+            f"{data_path}{sub}/a1.log", f"{data_path}{sub}/a2.log",
+            f"{data_path}{sub}/a1.pid", f"{data_path}{sub}/a2.pid",
+        ):
+            if sub and os.path.exists(f):
+                os.unlink(f)
     for f in ("/tmp/gpusybio-a1.log", "/tmp/gpusybio-a2.log", "/tmp/gpusybio-a1.pid", "/tmp/gpusybio-a2.pid"):
         if os.path.exists(f):
             os.unlink(f)
@@ -84,6 +96,7 @@ def make_config(
 
     return Config(
         db_path=tmp,
+        data_path=data_path,
         admin_host="127.0.0.1",
         admin_port=ADMIN_PORT,
         applications=applications

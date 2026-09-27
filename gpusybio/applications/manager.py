@@ -97,7 +97,7 @@ class AppConfig:
             configured_gpu_memory_mb=row.configured_gpu_memory_mb,
             effective_gpu_memory_mb=row.effective_gpu_memory_mb,
             safety_margin=row.gpu_memory_safety_margin,
-            supports_load_unload=row.supports_load_unload,
+            supports_load_unload=bool(row.unload_script),
             allow_automatic_unload=row.allow_automatic_unload,
             pinned=row.pinned,
             max_concurrent_requests=row.max_concurrent_requests,
@@ -123,12 +123,14 @@ class ApplicationManager:
         bus: EventBus,
         db: SessionFactory,
         settings,
+        data_path: str | None = None,
     ):
         self._states = states
         self._resources = resources
         self._bus = bus
         self._db = db
         self._settings = settings
+        self._data_path = data_path
         self._configs: dict[str, AppConfig] = {}
         self._http = httpx.AsyncClient()
         self._watchdog_task: asyncio.Task | None = None
@@ -144,6 +146,10 @@ class ApplicationManager:
         return cfg
 
     def config(self, app_id: str) -> AppConfig:
+        # Lazy-load from the DB (source of truth) if not cached — covers
+        # API-created apps that a startup pass didn't load.
+        if app_id not in self._configs:
+            self.load_config(app_id)
         return self._configs[app_id]
 
     def reload_all(self, ids: list[str]) -> None:
@@ -206,7 +212,7 @@ class ApplicationManager:
         self._states.set_process(app_id, ProcessState.STARTING)
         await self._emit("START", app_id=app_id)
 
-        result = await run_script(cfg.start_script, app_id=app_id, port=cfg.port, timeout=30.0)
+        result = await run_script(cfg.start_script, app_id=app_id, port=cfg.port, timeout=30.0, data_path=self._data_path)
         pid = _parse_pid(result)
         if result.exit_code != 0 or pid is None:
             self._states.set_process(app_id, ProcessState.ERROR)
@@ -271,7 +277,7 @@ class ApplicationManager:
 
         pid = s.pid
         if cfg.stop_script and pid is not None:
-            result = await run_script(cfg.stop_script, app_id=app_id, pid=pid, timeout=30.0)
+            result = await run_script(cfg.stop_script, app_id=app_id, pid=pid, timeout=30.0, data_path=self._data_path)
         elif pid is not None:
             result = await graceful_stop(pid)
         else:
@@ -314,7 +320,7 @@ class ApplicationManager:
         await self._emit("LOAD", app_id=app_id, required_mb=round(required, 1))
 
         if cfg.load_script:
-            result = await run_script(cfg.load_script, app_id=app_id, pid=s.pid, timeout=120.0)
+            result = await run_script(cfg.load_script, app_id=app_id, pid=s.pid, timeout=120.0, data_path=self._data_path)
         else:
             result = ScriptResult(0, "", "no load script", False)
 
@@ -343,9 +349,32 @@ class ApplicationManager:
         log.error("application load failed", application_id=app_id, detail=detail)
         return result
 
+    # -- release: unload vs stop (driven by the UNLOAD script) ---------------
+    # An app that has an unload script can be *unloaded* (freed while the
+    # process stays up — fast, re-loadable). An app without an unload script
+    # cannot be unloaded (the process *is* the model), so it must be *stopped*
+    # directly. The load script is optional: when absent, an unloaded app
+    # resumes serving without a load step.
+    async def release(self, app_id: str, force: bool = False) -> ScriptResult | None:
+        """Free the app's VRAM. An app with an **unload script** is unloaded —
+        the process stays up and the model is released (fast, re-loadable). An
+        app without an unload script cannot be unloaded (there is no model to
+        release — the process *is* the model), so it is **stopped** directly:
+        the process is killed and its VRAM freed. Both paths free VRAM; the
+        difference is whether the process survives."""
+        if self.config(app_id).supports_load_unload:
+            return await self.unload(app_id)
+        return await self.stop(app_id, force=force)
+
     # -- unload (spec 04 §4.4) ----------------------------------------------
     async def unload(self, app_id: str) -> ScriptResult | None:
         cfg = self.config(app_id)
+        if not cfg.supports_load_unload:
+            # An app without an unload script cannot be unloaded — it must be
+            # stopped directly (use release() / stop()). Refuse rather than
+            # pretend to free VRAM the process still holds.
+            log.warning("unload refused: no unload script", application_id=app_id)
+            return None
         ok, why = self._states.can_unload(app_id)
         if not ok:
             log.warning("unload refused", application_id=app_id, reason=why)
@@ -359,7 +388,7 @@ class ApplicationManager:
         await self._emit("UNLOAD", app_id=app_id)
 
         if cfg.unload_script:
-            result = await run_script(cfg.unload_script, app_id=app_id, timeout=60.0)
+            result = await run_script(cfg.unload_script, app_id=app_id, timeout=60.0, data_path=self._data_path)
         else:
             result = ScriptResult(0, "", "no unload script", False)
 

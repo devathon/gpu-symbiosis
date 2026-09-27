@@ -5,6 +5,7 @@ interface Sample {
   t: number;
   vram: number;
   gpu: number;
+  temp: number | null;
 }
 
 interface Props {
@@ -24,6 +25,9 @@ interface Props {
  * updates the data store (tooltips work) without rendering the line path
  * on a time axis — the lines stayed invisible. setOption is the reliable
  * path here.
+ *
+ * Temperature is on a second (right-hand) axis: it is a °C value, not a
+ * percentage, so it cannot share the 0–100 % scale.
  */
 export default function GpuChart({ samples }: Props) {
   const elRef = useRef<HTMLDivElement>(null);
@@ -37,21 +41,51 @@ export default function GpuChart({ samples }: Props) {
     chart.setOption({
       backgroundColor: "transparent",
       animation: false,
-      tooltip: { trigger: "axis", valueFormatter: (v: number) => `${Number(v).toFixed(1)} %` },
-      grid: { left: 48, right: 16, top: 28, bottom: 24 },
-      legend: { textStyle: { color: "#a1a1aa" }, data: ["VRAM", "GPU"] },
+      tooltip: {
+        trigger: "axis",
+        formatter: (params: unknown) => {
+          const arr = (Array.isArray(params) ? params : [params]) as Array<{
+            axisValueLabel?: string;
+            marker?: string;
+            seriesName?: string;
+            value?: unknown;
+          }>;
+          if (arr.length === 0) return "";
+          let out = arr[0].axisValueLabel ?? "";
+          for (const p of arr) {
+            const v = Array.isArray(p.value) ? (p.value[1] as number) : (p.value as number);
+            if (v == null) continue;
+            const unit = p.seriesName === "Temp" ? "°C" : "%";
+            out += `<br/>${p.marker ?? ""}${p.seriesName ?? ""}: ${Number(v).toFixed(1)} ${unit}`;
+          }
+          return out;
+        },
+      },
+      grid: { left: 48, right: 44, top: 28, bottom: 24 },
+      legend: { textStyle: { color: "#a1a1aa" }, data: ["VRAM", "GPU", "Temp"] },
       // Time axis: x derived directly from the [timestamp, value] pairs.
       xAxis: {
         type: "time",
         axisLabel: { color: "#71717a", formatter: "{HH}:{mm}:{ss}" },
       },
-      yAxis: {
-        type: "value",
-        min: 0,
-        max: 100,
-        axisLabel: { color: "#71717a", formatter: (v: number) => `${v}%` },
-        splitLine: { lineStyle: { color: "#27272a" } },
-      },
+      yAxis: [
+        {
+          type: "value",
+          min: 0,
+          max: 100,
+          axisLabel: { color: "#71717a", formatter: (v: number) => `${v}%` },
+          splitLine: { lineStyle: { color: "#27272a" } },
+        },
+        {
+          type: "value",
+          yAxisIndex: 1,
+          position: "right",
+          min: 0,
+          max: 100,
+          axisLabel: { color: "#fb7185", formatter: (v: number) => `${v}°C` },
+          splitLine: { show: false },
+        },
+      ],
       series: [
         {
           name: "VRAM",
@@ -69,6 +103,15 @@ export default function GpuChart({ samples }: Props) {
           smooth: true,
           showSymbol: false,
           lineStyle: { color: "#34d399", width: 2.5 },
+        },
+        {
+          name: "Temp",
+          type: "line",
+          data: [],
+          smooth: true,
+          showSymbol: false,
+          yAxisIndex: 1,
+          lineStyle: { color: "#fb7185", width: 1.5, type: "dashed" },
         },
       ],
     });
@@ -88,6 +131,7 @@ export default function GpuChart({ samples }: Props) {
       series: [
         { name: "VRAM", data: samples.map((s) => [s.t, s.vram]) },
         { name: "GPU", data: samples.map((s) => [s.t, s.gpu]) },
+        { name: "Temp", data: samples.map((s) => [s.t, s.temp]) },
       ],
     });
   }, [samples]);

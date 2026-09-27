@@ -51,6 +51,12 @@ class RequestManager:
         # request_id -> asyncio.Event (forward signal)
         self._forward: dict[str, asyncio.Event] = {}
         self._active: dict[str, set[str]] = {}  # app_id -> in-flight request ids
+        # gateway_id -> in-flight request ids (spec 11 §3: a gateway shows
+        # PROCESSING only while serving its OWN requests — two gateways on the
+        # same app must not both light up).
+        self._active_gw: dict[str, set[str]] = {}
+        # request_id -> gateway_id (in-flight only; used to drop the gw mapping)
+        self._gw_of: dict[str, str] = {}
         self._lock = asyncio.Lock()
         # Demand tracking for the scheduler scoring model (spec 06 §6.3/§6.4).
         self._demand = DemandTracker()
@@ -204,6 +210,8 @@ class RequestManager:
                 self._queue.enqueue(slot)  # back to the queue
                 return None
             self._active.setdefault(app_id, set()).add(request_id)
+            self._active_gw.setdefault(slot.gateway_id, set()).add(request_id)
+            self._gw_of[request_id] = slot.gateway_id
         self._states.request_started(app_id)
         self._states.ensure(app_id).queued_requests = self.queued_count(app_id)
         await self._update_status(request_id, "PROCESSING", started_at=True)
@@ -213,12 +221,16 @@ class RequestManager:
         return app_id
 
     # -- terminal states (spec 05 §6) ---------------------------------------------
-    async def complete(self, request_id: str, error: str | None = None) -> None:
+    async def complete(
+        self, request_id: str, error: str | None = None,
+        input_tokens: int | None = None, output_tokens: int | None = None,
+    ) -> None:
         slot = self._queue.get(request_id) or self._slot_from_db(request_id)
         app_id = slot.application_id if slot else ""
         ok = error is None
         status = "COMPLETED" if ok else "FAILED"
-        await self._finish(request_id, status, app_id, error)
+        await self._finish(request_id, status, app_id, error,
+                          input_tokens=input_tokens, output_tokens=output_tokens)
 
     async def cancel(self, request_id: str) -> None:
         """Client disconnect / queue full / explicit clear (Invariant 6)."""
@@ -237,16 +249,29 @@ class RequestManager:
     def active_count(self, app_id: str) -> int:
         return len(self._active.get(app_id, ()))
 
+    def active_count_gateway(self, gateway_id: str) -> int:
+        """In-flight request count for one gateway (spec 11 §3 state)."""
+        return len(self._active_gw.get(gateway_id, ()))
+
     def queued_count(self, app_id: str) -> int:
         return sum(1 for s in self._queue.all_slots() if s.application_id == app_id)
 
     # -- internals -----------------------------------------------------------------
-    async def _finish(self, request_id: str, status: str, app_id: str, error: str | None) -> None:
+    async def _finish(
+        self, request_id: str, status: str, app_id: str, error: str | None,
+        input_tokens: int | None = None, output_tokens: int | None = None,
+    ) -> None:
         async with self._lock:
             if app_id:
                 self._active.get(app_id, set()).discard(request_id)
             if app_id and app_id in self._active and not self._active[app_id]:
                 del self._active[app_id]
+            gw_id = self._gw_of.get(request_id)
+            if gw_id is not None:
+                self._active_gw.get(gw_id, set()).discard(request_id)
+                if gw_id in self._active_gw and not self._active_gw[gw_id]:
+                    del self._active_gw[gw_id]
+                self._gw_of.pop(request_id, None)
             if app_id:
                 self._states.request_finished(app_id)
         ev = self._forward.pop(request_id, None)
@@ -254,7 +279,8 @@ class RequestManager:
             ev.set()  # wake the waiter: forward (scheduler) OR terminal (cancel/expire)
         if app_id and status == "COMPLETED":
             self._demand.service(app_id)  # spec 06 §6.4 (service rate = completions/min)
-        await self._update_status(request_id, status, completed_at=True, error=error)
+        await self._update_status(request_id, status, completed_at=True, error=error,
+                                 input_tokens=input_tokens, output_tokens=output_tokens)
         if app_id:
             self._states.ensure(app_id).queued_requests = self.queued_count(app_id)
         await self._bus.publish_raw(
@@ -288,6 +314,8 @@ class RequestManager:
         started_at: bool = False,
         completed_at: bool = False,
         error: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
     ) -> None:
         now = _dt(time.time())
         try:
@@ -306,6 +334,11 @@ class RequestManager:
                         row.service_time_sec = (now - row.started_at).total_seconds()
                 if error:
                     row.error = error
+                # Per-request token counts from the upstream response headers (spec 08 §9.2).
+                if input_tokens is not None:
+                    row.input_tokens = input_tokens
+                if output_tokens is not None:
+                    row.output_tokens = output_tokens
         except Exception:  # noqa: BLE001
             log.exception("request status update failed")
 

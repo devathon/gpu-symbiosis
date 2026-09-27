@@ -24,15 +24,21 @@ from gpusybio.state import StateManager
 
 # -- stubs -------------------------------------------------------------------
 class StubApp:
-    def __init__(self, pinned=False, allow_automatic_unload=True, idle_timeout=None):
+    def __init__(self, pinned=False, allow_automatic_unload=True, idle_timeout=None,
+                 supports_load_unload=True):
         self.pinned = pinned
         self.allow_automatic_unload = allow_automatic_unload
         self.idle_unload_timeout_sec = idle_timeout
         self.idle_threshold_gpu_pct = 5.0
+        self.supports_load_unload = supports_load_unload
         self.unloaded = []
+        self.stopped = []
 
     def unload(self, app_id):
         self.unloaded.append(app_id)
+
+    def stop(self, app_id):
+        self.stopped.append(app_id)
 
 
 class StubApps:
@@ -44,6 +50,18 @@ class StubApps:
 
     async def unload(self, app_id):
         self._cfgs[app_id].unload(app_id)
+
+    async def stop(self, app_id, force=False):
+        self._cfgs[app_id].stop(app_id)
+
+    async def release(self, app_id, force=False):
+        # Mirrors ApplicationManager.release(): unload if the app supports
+        # load/unload, else stop it directly (it cannot be unloaded).
+        cfg = self._cfgs[app_id]
+        if cfg.supports_load_unload:
+            cfg.unload(app_id)
+        else:
+            cfg.stop(app_id)
 
 
 class StubResources:
@@ -221,6 +239,21 @@ async def test_non_api_idle_app_is_auto_unloaded():
     await asyncio.sleep(1.1)
     unloaded = await u.tick()
     assert unloaded == ["c1"]
+
+
+# -- unit: app without load/unload scripts is STOPPED, not unloaded -----------
+async def test_idle_app_without_load_unload_is_stopped():
+    states = StateManager()
+    load_app(states, "a1")
+    apps = StubApps({"a1": StubApp(supports_load_unload=False)})
+    rm = StubRM(gw_app={"gw1": "a1"})
+    u = make_unloader(apps, states, rm, StubResources(0.0), StubBus(), ["a1"], ["gw1"],
+                      min_residency=0.0, idle_timeout=1.0)
+    await asyncio.sleep(1.1)
+    released = await u.tick()
+    assert released == ["a1"]  # VRAM freed either way
+    assert apps.config("a1").unloaded == []  # NOT unloaded …
+    assert apps.config("a1").stopped == ["a1"]  # … it is stopped directly
 
 
 # -- E2E: idle-status API ------------------------------------------------------

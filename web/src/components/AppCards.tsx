@@ -41,18 +41,23 @@ export default function AppCards({
             </div>
             <div className="flex flex-wrap gap-1.5">
               {a.process_state === "RUNNING" ? (
-                a.supports_load_unload && a.residency_state === "LOADED" ? (
-                  <Btn label="Unload" onClick={() => act(() => api.appUnload(a.id))} />
-                ) : (
+                <>
+                  {/* Unloadable app (has an unload script): Load when not
+                      loaded, Unload when loaded — and Stop is ALWAYS available
+                      (the direct-kill path). A non-unloadable app just offers
+                      Stop. Force Stop (immediate kill) is always shown. */}
+                  {a.supports_load_unload && a.residency_state !== "LOADED" && (
+                    <Btn label="Load" onClick={() => act(() => api.appLoad(a.id))} />
+                  )}
+                  {a.supports_load_unload && a.residency_state === "LOADED" && (
+                    <Btn label="Unload" onClick={() => act(() => api.appUnload(a.id))} />
+                  )}
                   <Btn label="Stop" onClick={() => act(() => api.appStop(a.id))} />
-                )
+                  <Btn label="Force Stop" title="Kill immediately, dropping active requests" onClick={() => forceStop(a)} />
+                </>
               ) : (
                 <Btn label="Start" onClick={() => act(() => api.appStart(a.id))} />
               )}
-              {a.process_state === "RUNNING" &&
-                a.supports_load_unload &&
-                a.residency_state !== "LOADED" && <Btn label="Load" onClick={() => act(() => api.appLoad(a.id))} />}
-              {a.process_state === "RUNNING" && <Btn label="Force Stop" title="Kill immediately, dropping active requests" onClick={() => forceStop(a)} />}
               {a.pinned ? (
                 <Btn label="Unpin" onClick={() => act(() => api.appUnpin(a.id))} />
               ) : (

@@ -74,11 +74,19 @@ All scripts run with a controlled environment (see [12-security.md](12-security.
 
 - configured working directory
 - configured environment variables (including `GPUSYB_APP_ID`, `GPUSYB_PORT`, `GPUSYB_PID`)
+- the **global data path** (`GPUSYB_DATA_PATH`) and derived `GPUSYB_LOG`
+  (`<data_path>/logs/<app_id>.log`) and `GPUSYB_PID_FILE`
+  (`<data_path>/pids/<app_id>.pid`) — the application's stdout is the log, so a
+  start script redirects it to `"$GPUSYB_LOG"` and writes the pid to
+  `"$GPUSYB_PID_FILE"` (the token metrics in [08 §5](08-metrics-module.md#5-llama-metrics)
+  are parsed from that log)
 - execution timeout
 - captured stdout / stderr
 - recorded exit code
 
-Script failures are recorded as application events.
+The global data path is a single top-level config value (`data_path`); the log
+and pid paths are derived from it and the application id — there is no per-app
+log path. Script failures are recorded as application events.
 
 ## 3. Networking
 
@@ -184,8 +192,10 @@ They seed the scheduler's switching-cost model.
 ## 7. Lifecycle Configuration
 
 ```text
-supports_load_unload     derived: load_script AND unload_script present
-                         (or the explicit stop/start fallback is enabled)
+supports_load_unload     derived: unload_script present (the app can be
+                         *unloaded* — process stays up, model released).
+                         load_script is optional: if absent, an unloaded app
+                         resumes serving with no load step.
 allow_automatic_unload   bool
 idle_unload_timeout      seconds, for idle-based automatic unloading
 ```

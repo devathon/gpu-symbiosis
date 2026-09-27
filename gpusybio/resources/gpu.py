@@ -179,15 +179,18 @@ class NvmlBackend:
             clock = None
         rx = tx = None
         try:
-            rx_c = float(pynvml.nvmlDeviceGetPcieThroughput(h, getattr(pynvml, "NVML_PCIE_UTIL_RX_BYTES", 2)))
-            tx_c = float(pynvml.nvmlDeviceGetPcieThroughput(h, getattr(pynvml, "NVML_PCIE_UTIL_TX_BYTES", 4)))
+            rx_c = float(pynvml.nvmlDeviceGetPcieThroughput(h, getattr(pynvml, "NVML_PCIE_UTIL_RX_BYTES", 0x10000)))
+            tx_c = float(pynvml.nvmlDeviceGetPcieThroughput(h, getattr(pynvml, "NVML_PCIE_UTIL_TX_BYTES", 0x20000)))
             now = time.monotonic()
             if self._pcie_prev is not None:
                 prev_rx, prev_tx, prev_t = self._pcie_prev
                 dt = now - prev_t
                 if dt > 0.05:
-                    rx = (rx_c - prev_rx) / dt / MB
-                    tx = (tx_c - prev_tx) / dt / MB
+                    # The counters are cumulative 64-bit values; a driver reset
+                    # or counter wrap makes a reading *decrease* — clamp to 0
+                    # instead of reporting a negative rate.
+                    rx = max(0.0, rx_c - prev_rx) / dt / MB
+                    tx = max(0.0, tx_c - prev_tx) / dt / MB
             self._pcie_prev = (rx_c, tx_c, now)
         except Exception:  # noqa: BLE001
             self._pcie_prev = None
@@ -221,6 +224,15 @@ class NvmlBackend:
     def process_utilization_pct(self, pid: int | None) -> float:
         # NVML does not expose per-process utilization on all drivers; 0.0.
         return 0.0
+
+    def set_loaded(self, app_id: str, memory_mb: float) -> None:
+        """No-op on real hardware.
+
+        The app manager calls this to drive the *fake* backend's simulated
+        VRAM (spec 07 §2); with NVML the memory usage is read live from the
+        device, so there is nothing to set. Present here so the same
+        application-manager code path runs on both backends.
+        """
 
     def close(self) -> None:
         self._pynvml.nvmlShutdown()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 import yaml
@@ -61,6 +62,10 @@ class ApplicationSpec(BaseModel):
 
     enabled: bool = True
 
+    # Seed control (spec 16 §2.6): the seed creates missing rows only; an
+    # existing DB row is updated at startup only if this is true.
+    update: bool = False
+
 
 class GatewaySpec(BaseModel):
     """One externally exposed port bound to an application (spec 05)."""
@@ -76,6 +81,10 @@ class GatewaySpec(BaseModel):
     request_timeout_sec: float | None = None
     max_concurrent_requests: int = Field(default=1, ge=1)
     enabled: bool = True
+
+    # Seed control (spec 16 §2.6): the seed creates missing rows only; an
+    # existing DB row is updated at startup only if this is true.
+    update: bool = False
 
 
 class GpuSpec(BaseModel):
@@ -138,11 +147,27 @@ class SettingsSpec(BaseModel):
 
 class Config(BaseModel):
     db_path: str = "gpusybio.db"
+    data_path: str | None = None
     admin_host: str = "127.0.0.1"
     admin_port: int = 9130
     settings: SettingsSpec = SettingsSpec()
     applications: list[ApplicationSpec] = []
     gateways: list[GatewaySpec] = []
+
+    def effective_data_path(self) -> str:
+        """The global data path: log at <data_path>/logs/<id>.log, pid at <data_path>/pids/<id>.pid."""
+        if self.data_path:
+            return os.path.expanduser(self.data_path)
+        if os.path.isabs(self.db_path):
+            base = os.path.basename(self.db_path).removesuffix(".db")
+            return os.path.join(os.path.dirname(self.db_path), base or "gpusybio")
+        return os.path.expanduser("~/.gpusybio")
+
+    def app_log_path(self, app_id: str) -> str:
+        return os.path.join(self.effective_data_path(), "logs", f"{app_id}.log")
+
+    def app_pid_path(self, app_id: str) -> str:
+        return os.path.join(self.effective_data_path(), "pids", f"{app_id}.pid")
 
 
 def load_yaml(path: str) -> Config:

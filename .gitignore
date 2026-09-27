@@ -22,3 +22,7 @@ cap*.jpg
 cap_b64.txt
 chart_capture.png
 new_chart_capture.png
+
+# Data
+prod/
+

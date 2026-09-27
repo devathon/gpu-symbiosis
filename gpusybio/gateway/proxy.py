@@ -22,6 +22,23 @@ from gpusybio.gateway.request_manager import RequestManager
 
 log = get_logger("gateway-proxy")
 
+
+def _token_headers(resp) -> tuple[int | None, int | None]:
+    """Per-request token counts from the upstream response headers (spec 08 §9.2)."""
+    h = resp.headers
+
+    def _int(name: str) -> int | None:
+        v = h.get(name)
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    return _int("X-Input-Tokens"), _int("X-Output-Tokens")
+
+
 # Forwarded headers that must not be duplicated
 _HOP_HEADERS = {
     "connection",
@@ -208,7 +225,8 @@ def make_gateway_proxy(
             if resp is None:
                 await request_manager.complete(request_id, error=None if status < 500 else f"upstream {status}")
             else:
-                await _stream(send, resp, receive, request_id, status)
+                tokens = _token_headers(resp)  # per-request token counts (spec 08 §9.2)
+                await _stream(send, resp, receive, request_id, status, tokens)
         except (asyncio.CancelledError,):
             raise
         except Exception as e:  # noqa: BLE001 - upstream unreachable etc.
@@ -219,8 +237,10 @@ def make_gateway_proxy(
                 pass
             await request_manager.complete(request_id, error=str(e)[:200])
 
-    async def _stream(send, resp, receive, request_id: str, status: int):
+    async def _stream(send, resp, receive, request_id: str, status: int,
+                     tokens: tuple[int | None, int | None] | None = None):
         """Pump the upstream body to the client, racing client disconnect."""
+        in_tok, out_tok = (tokens or (None, None))
         stream = resp.content
 
         async def pump():
@@ -263,7 +283,10 @@ def make_gateway_proxy(
                 await request_manager.complete(request_id, error=str(exc)[:200])
             else:
                 await send({"type": "http.response.body", "body": b""})
-                await request_manager.complete(request_id, error=None if status < 500 else f"upstream {status}")
+                await request_manager.complete(
+                    request_id, error=None if status < 500 else f"upstream {status}",
+                    input_tokens=in_tok, output_tokens=out_tok,
+                )
         finally:
             try:
                 resp.close()  # sync in aiohttp 3.13

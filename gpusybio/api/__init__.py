@@ -33,6 +33,7 @@ from gpusybio.events.bus import PERSISTENT_EVENTS
 from gpusybio.events.sse import SSEHub
 from gpusybio.gateway.request_manager import RequestManager
 from gpusybio.metrics import MetricsCollector
+from gpusybio.scoring import gateway_score
 from gpusybio.state import StateManager
 from gpusybio.applications.lifecycle import combined_ui_state
 
@@ -74,7 +75,7 @@ def _app_view(row: Application, state, resources) -> dict:
         "load_time_sec": row.load_time_sec,
         "unload_time_sec": row.unload_time_sec,
         "stop_time_sec": row.stop_time_sec,
-        "supports_load_unload": row.supports_load_unload,
+        "supports_load_unload": bool(row.unload_script),
         "allow_automatic_unload": row.allow_automatic_unload,
         "pinned": row.pinned,
         "consecutive_load_failures": row.consecutive_load_failures,
@@ -98,6 +99,25 @@ def _app_view(row: Application, state, resources) -> dict:
     }
 
 
+def _gw_score(rm: RequestManager, row: Gateway) -> dict | None:
+    """Per-gateway scheduler score + full breakup (spec 06 §6.9) for the
+    explainability surface — shown on the gateway card, hoverable. Computed for
+    every enabled gateway (idle ones score 0); demand is time-decayed (spec 06
+    §6.3/§6.4) so it is a live metric, not a cached candidate value."""
+    if not row.enabled:
+        return None
+    d = rm.demand()
+    return gateway_score(
+        row.priority,
+        rm.queue().length(row.id),
+        row.max_waiting_queue,
+        rm.queue().oldest_wait_sec(row.id),
+        row.max_waiting_time_sec,
+        d.arrival_rate(row.id),
+        d.service_rate(row.application_id),
+    )
+
+
 def _gw_view(row: Gateway, rm: RequestManager, states: StateManager) -> dict:
     return {
         "id": row.id,
@@ -116,6 +136,7 @@ def _gw_view(row: Gateway, rm: RequestManager, states: StateManager) -> dict:
             "length": rm.queue().length(row.id),
             "oldest_wait_sec": round(rm.queue().oldest_wait_sec(row.id), 1),
         },
+        "score": _gw_score(rm, row),
     }
 
 
@@ -131,10 +152,13 @@ def _gw_state(row: Gateway, rm: RequestManager, states: StateManager) -> str:
         return "LOADING"
     if s.process is ProcessState.STOPPING:
         return "UNLOADING"
-    if rm.queue().length(row.id) > 0:
-        return "WAITING" if s.active_requests == 0 else "PROCESSING"
-    if s.active_requests > 0:
+    # Per-gateway in-flight count (spec 11 §3): a gateway shows PROCESSING only
+    # while serving its OWN requests — two gateways bound to the same app must
+    # not both light up just because the shared app is busy.
+    if rm.active_count_gateway(row.id) > 0:
         return "PROCESSING"
+    if rm.queue().length(row.id) > 0:
+        return "WAITING"
     return "IDLE"
 
 
@@ -322,6 +346,9 @@ def make_admin_api(
     async def create_application(body: dict, request: Request):
         try:
             row = Application(id=body["id"], **{k: v for k, v in body.items() if k != "id"})
+            # Kept in sync (a cache for direct DB readers); the source of truth
+            # is ``unload_script`` — read sites derive the flag from it.
+            row.supports_load_unload = bool(row.unload_script)
             with db() as s:
                 s.add(row)
             apps.load_config(row.id)
@@ -355,6 +382,9 @@ def make_admin_api(
             for k, v in body.items():
                 if hasattr(row, k) and k not in ("id",):
                     setattr(row, k, v)
+            # Kept in sync (a cache for direct DB readers); the source of truth
+            # is ``unload_script`` — read sites derive the flag from it.
+            row.supports_load_unload = bool(row.unload_script)
         apps.load_config(app_id)
         request_manager.app_configs().update(
             {app_id: {"max_concurrent_requests": request_manager.app_configs()[app_id]["max_concurrent_requests"]}}
@@ -461,6 +491,10 @@ def make_admin_api(
 
     @api.post("/api/applications/{app_id}/unload", status_code=202)
     async def unload_application(app_id: str):
+        if not apps.config(app_id).supports_load_unload:
+            raise HTTPException(
+                400, "app has no unload script — it cannot be unloaded; stop it instead"
+            )
         return await _transition(app_id, "unload")
 
     # -- pinned applications (spec 06 §3.1 / Phase 5) --------------------------
@@ -554,6 +588,7 @@ def make_admin_api(
                 g.port == body["port"] and g.id != gw_id for g in s.query(Gateway)
             ):
                 raise HTTPException(409, f"port {body['port']} already in use")
+            old_port = row.port
             for k, v in body.items():
                 if hasattr(row, k) and k != "id":
                     setattr(row, k, v)
@@ -561,9 +596,21 @@ def make_admin_api(
         for k, v in body.items():
             if k in gc:
                 gc[k] = v
-        # A port change re-spawns the listener live (spec 11 §3.2).
-        if "port" in body and on_gateway_created is not None:
-            await on_gateway_created(gw_id)
+        # Only a port *change* re-spawns the listener live (spec 11 §3.2). The
+        # form always echoes the current port, so re-spawning on every save would
+        # re-bind the same port and race the shutdown ("address already in use").
+        # A changed port is a different socket, so re-spawning it is safe.
+        if "port" in body and body["port"] != old_port and on_gateway_created is not None:
+            try:
+                await on_gateway_created(gw_id)
+            except Exception as e:  # noqa: BLE001
+                # New port unusable: restore the old port. _spawn_gateway probes
+                # before stopping the old listener, so the old listener is still
+                # up and this leaves the gateway consistent (listener on old_port).
+                with db() as s:
+                    s.get(Gateway, gw_id).port = old_port
+                gc["port"] = old_port
+                raise HTTPException(409, f"could not start gateway on port {body['port']}: {e}")
         await _audit("gateway_updated", actor=_actor(request), detail=gw_id)
         return {"id": gw_id}
 
@@ -745,6 +792,8 @@ def make_admin_api(
                     "queue_wait_sec": r.queue_wait_sec,
                     "service_time_sec": r.service_time_sec,
                     "error": r.error,
+                    "input_tokens": r.input_tokens,
+                    "output_tokens": r.output_tokens,
                 }
                 for r in rows
             ]

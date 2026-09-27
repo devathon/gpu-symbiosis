@@ -103,6 +103,28 @@ requests
 completed requests
 ```
 
+**Source.** A real `llama-server` exposes no cumulative token totals over HTTP
+(`/metrics` is per-request Prometheus gauges, `/state` is model state only), but
+it logs each request. The application's stdout **is** the log — the start script
+redirects it to `<data_path>/logs/<id>.log` (the global data path, §2.5 of
+[03-application-model.md](03-application-model.md)) — and the metrics handler
+tails it, parsing the per-request lines (`llama_perf_context_print`):
+
+```text
+prompt eval time = 1234.56 ms / 100 tokens ( 12.35 ms per token, 81.00 tokens per second)
+       eval time = 5678.90 ms / 200 runs   ( 28.39 ms per token, 35.22 tokens per second)
+      total time = 6913.46 ms / 300 tokens
+```
+
+The prompt line's count is the input tokens, the eval line's count (runs) the
+output tokens, and each line's `tokens per second` the prompt/generation speed;
+the total line gives the overall throughput. The tailer tracks a read offset
+(rotation-safe) and accumulates lifetime totals; `reset()` starts a fresh
+lifetime on app start. Apps that do expose a `/stats` endpoint (e.g. the mock)
+still work: the first non-zero source wins (log, then `/stats`, then the
+request-tracked sums). The gateway also records per-request token counts from
+the upstream response headers (`X-Input-Tokens` / `X-Output-Tokens`, §9.2).
+
 Optionally:
 
 ```text
@@ -237,9 +259,11 @@ The handler is the type's own recording logic and implements the interface from
 ```text
 collect(app) -> {metric_id: value}
        per sample tick (1 s), only while the app is RUNNING and LOADED;
-       typically polls the app's own JSON endpoint on its port
+       for `llama`/`ollama`, tails the app's log (<data_path>/logs/<id>.log, the
+       app's stdout) for the per-request token lines (§5) — the primary source —
+       and falls back to polling the app's own JSON endpoint on its port
        (llama-server /metrics or /state, Ollama /api/ps, ComfyUI queue stats)
-       and maps response fields to metric ids.
+       and to the request-tracked sums, mapping response fields to metric ids.
 
 on_request_complete(request) -> {metric_id: value}
        per-request metrics (e.g. input/output tokens, prompt/generation time)

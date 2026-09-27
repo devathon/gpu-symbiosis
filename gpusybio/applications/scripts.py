@@ -29,14 +29,24 @@ async def run_script(
     cwd: str | None = None,
     timeout: float = 60.0,
     extra_env: dict[str, str] | None = None,
+    data_path: str | None = None,
 ) -> ScriptResult:
-    """Execute a lifecycle script (POSIX shell). Returns a ScriptResult."""
+    """Execute a lifecycle script (POSIX shell). Returns a ScriptResult.
+
+    When ``data_path`` is given, the script also sees ``GPUSYB_DATA_PATH``,
+    ``GPUSYB_LOG`` (<data_path>/logs/<app_id>.log) and ``GPUSYB_PID_FILE``
+    (<data_path>/pids/<app_id>.pid); the app's stdout is the log (spec 03 §2.5).
+    """
     env = {
         **os.environ,
         "GPUSYB_APP_ID": app_id,
         "GPUSYB_PORT": str(port) if port is not None else "",
         "GPUSYB_PID": str(pid) if pid is not None else "",
     }
+    if data_path:
+        env["GPUSYB_DATA_PATH"] = data_path
+        env["GPUSYB_LOG"] = os.path.join(data_path, "logs", f"{app_id}.log")
+        env["GPUSYB_PID_FILE"] = os.path.join(data_path, "pids", f"{app_id}.pid")
     if extra_env:
         env.update(extra_env)
 

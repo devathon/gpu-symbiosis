@@ -1,8 +1,10 @@
 """Composition root (spec 02 §5): one process, one event loop, many ports.
 
 Startup (spec 09 §8 reconciliation): the DB is the source of truth; runtime
-state starts fresh (all applications STOPPED/OFF in memory), so reconciliation
-= verify no leftover processes hold app ports and re-seed config.
+state starts fresh (all applications STOPPED/OFF in memory). The seed creates
+missing application/gateway rows and updates existing ones only when a spec
+sets ``update: true`` (spec 16 §2.6); reconciliation then verifies no
+leftover processes hold app ports.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from gpusybio.applications.manager import ApplicationManager
 from gpusybio.config.models import Config
 from gpusybio.config.seed import seed_database
 from gpusybio.database.db import create_engine, init_db, make_session_factory
+from gpusybio.database.models import Application, Gateway
 from gpusybio.events.bus import EventBus
 from gpusybio.events.log import get_logger, setup_logging
 from gpusybio.events.sse import SSEHub
@@ -53,17 +56,25 @@ class Server:
             memory_reserve_mb=float(config.settings.gpu.memory_reserve_mb),
             memory_safety_margin=float(config.settings.gpu.memory_safety_margin),
         )
-        self.apps = ApplicationManager(self.states, self.resources, self.bus, self.db, config.settings)
-        self.app_ids = [a.id for a in config.applications]
-        self.gateway_ids = [g.id or f"gw-{g.application_id}" for g in config.gateways]
+        self.data_path = config.effective_data_path()
+        self.apps = ApplicationManager(
+            self.states, self.resources, self.bus, self.db, config.settings, data_path=self.data_path
+        )
+        # DB is the source of truth (spec 16 §2.6): load config for ALL persisted
+        # applications and gateways — not just the seed document. API-created
+        # ones survive a restart and must be first-class (scheduler, metrics,
+        # idle, gateway listeners, shutdown).
+        with self.db() as s:
+            app_rows = s.query(Application).all()
+            gw_rows = s.query(Gateway).all()
+        self.app_ids = [a.id for a in app_rows]
+        self.gateway_ids = [g.id for g in gw_rows]
         for app_id in self.app_ids:
             self.apps.load_config(app_id)
 
-        gw_configs = {}
-        for g in config.gateways:
-            gid = g.id or f"gw-{g.application_id}"
-            gw_configs[gid] = {
-                "id": gid,
+        gw_configs = {
+            g.id: {
+                "id": g.id,
                 "name": g.name,
                 "application_id": g.application_id,
                 "port": g.port,
@@ -75,7 +86,9 @@ class Server:
                 "max_concurrent_requests": g.max_concurrent_requests,
                 "enabled": g.enabled,
             }
-        app_configs = {a.id: {"max_concurrent_requests": a.max_concurrent_requests} for a in config.applications}
+            for g in gw_rows
+        }
+        app_configs = {a.id: {"max_concurrent_requests": a.max_concurrent_requests} for a in app_rows}
         self.request_manager = RequestManager(
             self.states, self.db, self.bus, config.settings, gw_configs, app_configs
         )
@@ -85,8 +98,9 @@ class Server:
         )
         self.metrics = MetricsCollector(
             self.resources, self.states, self.request_manager, self.db, self.app_ids,
-            app_types={a.id: a.application_type for a in config.applications},
-            base_urls={a.id: f"http://127.0.0.1:{a.port}" for a in config.applications},
+            app_types={a.id: a.application_type for a in app_rows},
+            base_urls={a.id: f"http://127.0.0.1:{a.port}" for a in app_rows},
+            log_paths={a.id: config.app_log_path(a.id) for a in app_rows},
         )
         # Phase 4 (spec 06 §10): automatic idle detection + unloading.
         self.idle_unloader = IdleUnloader(
@@ -96,7 +110,11 @@ class Server:
             default_idle_timeout_sec=float(config.settings.scheduler.idle_unload_timeout_sec),
             interval=float(config.settings.scheduler.idle_unload_interval_sec),
         )
-        self._gw_servers: dict[str, uvicorn.Server] = {}
+        # gw_id -> (uvicorn.Server, serve task). The task is awaited on
+        # re-spawn so the old listening socket is really closed before we
+        # re-bind (spec 11 §3: re-saving a gateway must not fail with
+        # "address already in use").
+        self._gw_live: dict[str, tuple[uvicorn.Server, asyncio.Task]] = {}
         self.admin_api = make_admin_api(
             self.db, self.states, self.resources, self.request_manager,
             self.apps, self.scheduler, self.metrics, self.hub,
@@ -134,8 +152,9 @@ class Server:
         port = gw["port"]
         import socket
 
-        # Mirror uvicorn's bind (SO_REUSEADDR) so a TIME_WAIT from a just-
-        # closed listener doesn't make the port look taken.
+        # Probe the target port FIRST (SO_REUSEADDR, like uvicorn) so a conflict
+        # fails cleanly *before* the old listener is stopped — otherwise a failed
+        # re-bind would leave the gateway with no listener at all.
         probe = socket.socket()
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -144,17 +163,31 @@ class Server:
             raise RuntimeError(f"port {port} is not available") from e
         finally:
             probe.close()
-        old = self._gw_servers.pop(gw_id, None)
-        if old is not None:
-            old.should_exit = True
-        server = await self._serve("127.0.0.1", port, self._gateway_app(gw_id))
-        self._gw_servers[gw_id] = server
+
+        # Now stop the old listener (if any) and wait for its socket to actually
+        # close before re-binding. The API only calls this on a genuine port
+        # change (a different socket), so a same-port re-save is never a no-op
+        # race here.
+        await self._stop_gw_listener(gw_id)
+        self._gw_live[gw_id] = await self._serve("127.0.0.1", port, self._gateway_app(gw_id))
 
     async def _remove_gateway(self, gw_id: str) -> None:
         """Close a gateway's live listener on deletion."""
-        old = self._gw_servers.pop(gw_id, None)
-        if old is not None:
-            old.should_exit = True
+        await self._stop_gw_listener(gw_id)
+
+    async def _stop_gw_listener(self, gw_id: str) -> None:
+        """Stop a gateway listener and await its serve task so the listening
+        socket is really closed (uvicorn only releases it in shutdown())."""
+        rec = self._gw_live.pop(gw_id, None)
+        if rec is None:
+            return
+        server, task = rec
+        server.should_exit = True
+        if not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+            except asyncio.TimeoutError:
+                task.cancel()
 
     # -- startup (spec 09 §8) --------------------------------------------------
     def _reconcile(self) -> None:
@@ -169,12 +202,13 @@ class Server:
                     detail="a previous instance may still be running; start will fail readiness",
                 )
 
-    async def _serve(self, host: str, port: int, app) -> uvicorn.Server:
+    async def _serve(self, host: str, port: int, app) -> tuple[uvicorn.Server, asyncio.Task]:
         config = uvicorn.Config(app, host=host, port=port, log_level="warning", lifespan="on")
         server = uvicorn.Server(config)
         self._servers.append(server)
-        self._tasks.append(asyncio.create_task(server.serve(), name=f"uvicorn-{port}"))
-        return server
+        task = asyncio.create_task(server.serve(), name=f"uvicorn-{port}")
+        self._tasks.append(task)
+        return (server, task)
 
     async def serve(self) -> None:
         setup_logging(self.config.settings.log_level)

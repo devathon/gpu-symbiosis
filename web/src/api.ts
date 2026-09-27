@@ -56,6 +56,8 @@ export interface GwView {
   enabled: boolean;
   state: string;
   queue: { length: number; oldest_wait_sec: number };
+  /** Per-gateway scheduler score + breakup (spec 06 §6.9); hover shows detail. */
+  score?: ScoreBreakdown | null;
 }
 
 export interface Resources {

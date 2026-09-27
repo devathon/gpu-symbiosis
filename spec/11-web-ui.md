@@ -247,39 +247,35 @@ For each gateway queue: list of queued requests with `request_id`,
 `received_at`, `queued_at`, wait time, priority, client metadata. Actions:
 cancel (queued only), force-process (raises to top of queue).
 
-## 5. Scheduler Explainer
+## 5. Scheduler Score (per gateway)
 
-A particularly useful section — makes the scheduler explainable:
+The scheduler is made explainable **on the gateways themselves**, not in a
+separate explainer panel (active / candidate / resident apps are already evident
+from the Applications section). Each gateway card shows its live **scheduler
+score** (spec 06 §6.9); hovering the score reveals the **breakup**:
 
 ```text
-CURRENT DECISION
-
-Active:
-Qwen 3.8
-
-Candidate:
-Qwen 3.5
-
-Gateway Score:
-42.7
-
-Switching Penalty:
-8.4
-
-Effective Score:
-34.3
-
-Current Score:
-27.1
-
-Decision:
-KEEP QWEN 3.8
+score 42.7
+  priority          10
+  priority_pressure 30.0   (priority × backlog)
+  backlog_pressure  3.0    (max(queue fill, oldest wait))
+  waiting_pressure  5.2    (oldest wait / max wait)
+  recent_demand     7.5    (priority × normalized arrival/service)
+  demand (arr/svc)  12.0 / 4.3 = 2.79
+  ────────────────
+  switching penalty 8.4    ← only when this gateway is the current candidate
+  effective score   34.3   (score − penalty)
+  → switch (a2 beats a1 by margin 1.0)
 ```
 
-Backed by `GET /api/scheduler/current-decision` and the scheduler_events stream
-([06 §19](06-scheduler.md#19-explainability)). Also shows: current residents, VRAM
-accounting (total/reserve/resident/reserved/external/free), and the next switch
-threshold.
+The score is computed per gateway (`GET /api/status` → `gateways[id].score`);
+demand is time-decayed (spec 06 §6.3/§6.4), so it is a live metric, not a cached
+candidate value. The candidate context (switching penalty, effective score,
+decision) comes from `GET /api/scheduler/current-decision` and is shown only for
+the gateway that is the current candidate. The `current-decision` endpoint and
+the scheduler_events stream ([06 §19](06-scheduler.md#19-explainability)) also
+expose current residents, VRAM accounting (total/reserve/resident/reserved/
+external/free), and switch tracking for the Scheduler view and event log.
 
 ## 6. Event Log
 

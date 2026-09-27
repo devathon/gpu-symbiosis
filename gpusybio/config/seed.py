@@ -35,10 +35,16 @@ SETTING_KEYS = {
 
 
 def seed_database(factory: SessionFactory, config: Config) -> None:
-    """Upsert applications, gateways, and settings from the seed document.
+    """Seed applications, gateways, and settings from the seed document.
 
-    Existing rows keep their runtime-mutated fields (timing, observed memory,
-    failure counts); only configuration fields from the seed are upserted.
+    Seeding semantics (spec 16 §2.6 — DB is source of truth post-startup):
+    the seed creates missing rows only. An existing application/gateway row is
+    updated at startup ONLY if its spec sets ``update: true``; otherwise the
+    row is left untouched so runtime changes (via ``PUT /api/*``) survive a
+    restart. The seed never deletes rows absent from the document. Settings
+    always overwrite (there is no settings API — YAML is the only way to
+    change them). Existing rows keep their runtime-mutated fields (timing,
+    observed memory, failure counts).
     """
     with factory() as s:
         for spec in config.applications:
@@ -46,6 +52,8 @@ def seed_database(factory: SessionFactory, config: Config) -> None:
             if row is None:
                 row = Application(id=spec.id)
                 s.add(row)
+            elif not spec.update:
+                continue  # existing row, no update flag — leave untouched
             _apply_app_config(row, spec)
 
         for spec in config.gateways:
@@ -54,6 +62,8 @@ def seed_database(factory: SessionFactory, config: Config) -> None:
             if row is None:
                 row = Gateway(id=gid)
                 s.add(row)
+            elif not spec.update:
+                continue  # existing row, no update flag — leave untouched
             _apply_gateway_config(row, spec, gid)
 
         for key, getter in SETTING_KEYS.items():
@@ -87,7 +97,10 @@ def _apply_app_config(row: Application, spec) -> None:
     row.cpu_memory_required_mb = spec.cpu_memory_mb
     row.cpu_usage_expected_pct = spec.cpu_usage_pct
     row.gpu_memory_safety_margin = spec.gpu_memory_safety_margin
-    row.supports_load_unload = bool(spec.load_script and spec.unload_script)
+    # Derived: the app can be *unloaded* (freed while the process stays up) iff
+    # it has an unload script. A load script is optional — if absent, an
+    # unloaded app resumes serving without a load step.
+    row.supports_load_unload = bool(spec.unload_script)
     row.allow_automatic_unload = spec.allow_automatic_unload
     row.idle_unload_timeout_sec = spec.idle_unload_timeout_sec
     row.activity_detection_method = spec.activity_detection_method

@@ -225,12 +225,16 @@ class Scheduler:
                 best = sc
         return best or {"score": 0.0}
 
-    def _pick_candidate(self) -> tuple[dict, dict] | None:
+    def _pick_candidate(self, exclude: set[str] | None = None) -> tuple[dict, dict] | None:
         """Candidate selection (spec 05 §9): argmax of gateway scores.
-        Gateway set is read live so API-created gateways are schedulable."""
+        Gateway set is read live so API-created gateways are schedulable.
+        ``exclude``: application ids whose gateways are skipped (the drain
+        completion check excludes the draining app's own gateways)."""
         best_gw: str | None = None
         best_sc: dict | None = None
         for gid in self._rm.gateway_configs():
+            if exclude and self._rm.gateway(gid)["application_id"] in exclude:
+                continue
             sc = self._gateway_score(gid)
             if sc is not None and (best_sc is None or sc["score"] > best_sc["score"]):
                 best_gw, best_sc = gid, sc
@@ -276,21 +280,62 @@ class Scheduler:
                             + float(self._settings.scheduler.process_now_boost_ttl_sec)
                         )
 
+            # Drain completion (spec 06 §2: once active_requests == 0 the
+            # drain completes). New requests for a draining app only ever
+            # queue, so the drain is never cancelled or delayed by them: a
+            # draining app that just went idle switches out now. If the
+            # competing candidate's queue has emptied (requests cancelled),
+            # the drain is released and the app serves its own queued work at
+            # zero cost below (a drain only exists to serve a candidate).
+            for res in self.residents():
+                vs_res = self._states.get(res)
+                if vs_res.residency is not ResidencyState.LOADED or not vs_res.draining:
+                    continue
+                if self._rm.active_count(res) > 0:
+                    continue  # still draining
+                other = self._pick_candidate(exclude=self._drain_exclude_apps(res))
+                if other is None:
+                    if not self._dry_run:
+                        self._states.set_draining(res, False)
+                    continue  # res's own queued work is served below (zero-cost)
+                cand, csc = other
+                victim = self._apps.config(res)
+                ok = await self._do_switch(victim, cand["application_id"], trigger)
+                if ok and not self._dry_run:
+                    self._record_switch(res, cand["application_id"])
+                return await self._decide(
+                    trigger, cand, None, "switch" if ok else "wait",
+                    csc["score"], 0.0, 0.0,
+                    detail=(
+                        f"drain of {res} complete → switched to {cand['application_id']}"
+                        if ok
+                        else f"drain of {res} complete but switch to {cand['application_id']} not ready yet"
+                    ),
+                    scores=csc, active=cand["application_id"] if ok else None,
+                )
+
             # Resident-first (spec 06 §7 zero-cost path): a resident app with a
             # free slot and its own queued requests serves them at zero cost
             # BEFORE the scheduler considers evicting it for a competing
             # candidate. Without this, an idle resident's queued work can starve
             # behind a competitor whose score it cannot beat (its own completed
             # work raises its service rate and lowers its demand pressure).
-            # Draining/unloading apps take no new work (spec 06 §2).
+            # An UNLOADING app takes no new work here (the candidate path can
+            # switch back and re-load it). A still-loaded DRAINING app takes no
+            # new work here either (spec 06 §2: new requests during drain
+            # QUEUE, never cancel or delay the drain — otherwise a stream of
+            # new requests would hold the drain open indefinitely and starve
+            # the candidate it exists to serve). Its queued requests wait and
+            # are served when the app is resident again.
             for res in self.residents():
                 vs_res = self._states.get(res)
-                if (
-                    vs_res.draining
-                    or vs_res.residency is ResidencyState.UNLOADING
-                    or self._rm.queued_count(res) <= 0
-                    or self._rm.active_count(res) >= self._rm._app_limit(res)
-                ):
+                if vs_res.residency is ResidencyState.UNLOADING:
+                    continue
+                if vs_res.draining:
+                    continue
+                if self._rm.queued_count(res) <= 0:
+                    continue
+                if self._rm.active_count(res) >= self._rm._app_limit(res):
                     continue
                 free = self._rm._app_limit(res) - self._rm.active_count(res)
                 fwd = self._forward(res, free)
@@ -322,6 +367,16 @@ class Scheduler:
                 s.process is ProcessState.RUNNING and s.residency is ResidencyState.LOADED
             )
             if resident:
+                if s.draining:
+                    # A draining app takes no new work (spec 06 §2): its queued
+                    # requests wait. It is idle only in the instant the
+                    # drain-completion check above just switched it out, so
+                    # here it still has active work — wait for the drain.
+                    return await self._decide(
+                        trigger, cand, None, "drain", csc["score"], 0.0, 0.0,
+                        detail=f"{app_id} draining ({self._rm.active_count(app_id)} active)",
+                        scores=csc, active=app_id,
+                    )
                 limit = self._rm._app_limit(app_id)
                 free = limit - self._rm.active_count(app_id)
                 if free > 0:
@@ -400,17 +455,18 @@ class Scheduler:
                         scores=csc, active=victim.id, guards=guards,
                     )
 
+            # Drain guard (spec 06 §2/§14): a draining victim waits for its
+            # active work to finish; new requests only queue and never delay
+            # the drain (the drain-completion check above completes the switch
+            # once active reaches 0). A still-busy, not-yet-draining victim is
+            # marked DRAINING here (spec 06 §2).
             if vs.draining or vs.residency is ResidencyState.UNLOADING:
-                if vs.active_requests > 0:
-                    return await self._decide(
-                        trigger, cand, None, "drain", csc["score"], 0.0, cur_sc,
-                        detail=f"{victim.id} draining ({vs.active_requests} active)",
-                        scores=csc, active=victim.id, guards=guards,
-                    )
-                # Draining finished (active = 0): complete the switch below.
-            elif vs.active_requests > 0:
-                # spec 06 §2/§14: mark DRAINING; new requests queue, existing continue.
-                # The switch completes on request completion (spec 06 §17).
+                return await self._decide(
+                    trigger, cand, None, "drain", csc["score"], 0.0, cur_sc,
+                    detail=f"{victim.id} draining ({vs.active_requests} active)",
+                    scores=csc, active=victim.id, guards=guards,
+                )
+            if vs.active_requests > 0:
                 if not self._dry_run:
                     self._states.set_draining(victim.id, True)
                     await self._emit("DRAIN_START", application_id=victim.id)
@@ -434,11 +490,7 @@ class Scheduler:
                         scores=csc, active=victim.id, guards=guards,
                     )
                 if not self._dry_run:
-                    t = self._tracking
-                    t.switch_count += 1
-                    t.last_switch_time = time.time()
-                    t.last_pair = (victim.id, app_id)
-                    t.previous_application = victim.id
+                    self._record_switch(victim.id, app_id)
                 return await self._decide(
                     trigger, cand, None, "switch", csc["score"], penalty, cur_sc,
                     detail=f"switched {victim.id} → {app_id} (cost {cost:.2f}s)",
@@ -521,6 +573,16 @@ class Scheduler:
         unload_cost = min((cfg.unload_time_sec or 0.0) / 10.0, 1.0)
         return 1.0 + low_demand + low_priority + residency - unload_cost
 
+    def _drain_exclude_apps(self, res: str) -> set[str]:
+        """Apps whose gateways the drain-completion check must not pick:
+        ``res``'s own gateways (its queued requests wait — spec 06 §2) and
+        any other draining app (one drain active at a time in practice)."""
+        excl = {res}
+        for app_id in self._app_ids:
+            if self._states.get(app_id).draining:
+                excl.add(app_id)
+        return excl
+
     def _clear_draining(self) -> None:
         """A drain only exists to serve a candidate; no candidate → release it."""
         if self._dry_run:
@@ -529,6 +591,14 @@ class Scheduler:
             s = self._states.get(app_id)
             if s.draining and self._rm.queued_count(app_id) == 0:
                 self._states.set_draining(app_id, False)
+
+    def _record_switch(self, victim_id: str, app_id: str) -> None:
+        """Anti-thrash bookkeeping (spec 06 §16 'Additionally tracked')."""
+        t = self._tracking
+        t.switch_count += 1
+        t.last_switch_time = time.time()
+        t.last_pair = (victim_id, app_id)
+        t.previous_application = victim_id
 
     def _forward(self, app_id: str, limit: int) -> int:
         """Signal the next queued requests for this app (up to `limit`).
@@ -570,7 +640,10 @@ class Scheduler:
         """spec 06 §17 graceful switch: unload (drained) → load → ready → drain queue."""
         if self._dry_run:
             return True  # what-if: the switch would succeed, but don't act (spec 15)
-        await self._apps.unload(victim.id)
+        # release(): unload (keep process) if the victim supports load/unload,
+        # else stop it directly — an app without load/unload scripts cannot be
+        # unloaded, only stopped (both free the victim's VRAM).
+        await self._apps.release(victim.id)
         # Evicted → no longer a drain target (spec 06 §2). Without this the
         # victim's stale `draining` flag survives re-load and blocks
         # can_forward_now, starving its own queued requests.

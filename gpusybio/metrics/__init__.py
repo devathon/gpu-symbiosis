@@ -38,6 +38,7 @@ class MetricsCollector:
         app_ids: list[str],
         app_types: dict[str, str] | None = None,
         base_urls: dict[str, str] | None = None,
+        log_paths: dict[str, str] | None = None,
     ):
         self._resources = resources
         self._states = states
@@ -46,6 +47,7 @@ class MetricsCollector:
         self._app_ids = app_ids
         self._app_types = app_types or {}
         self._base_urls = base_urls or {}
+        self._log_paths = log_paths or {}
         self._history: deque = deque()
         self._task: asyncio.Task | None = None
         self._running = False
@@ -58,6 +60,7 @@ class MetricsCollector:
             app_id: make_handler(
                 self._app_types.get(app_id, "generic"),
                 resources, states, self.request_metrics, self._base_urls, None,
+                log_paths=self._log_paths,
             )
             for app_id in app_ids
         }
@@ -83,7 +86,7 @@ class MetricsCollector:
             self._handlers[app_id] = make_handler(
                 self._app_types.get(app_id, "generic"),
                 self._resources, self._states, self.request_metrics, self._base_urls,
-                self._session,
+                self._session, log_paths=self._log_paths,
             )
         self.aggregator.start()
         self._task = asyncio.get_event_loop().create_task(self._loop(), name="metrics")

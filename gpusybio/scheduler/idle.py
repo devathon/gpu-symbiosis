@@ -175,7 +175,10 @@ class IdleUnloader:
                 method="requests" if self._has_gateway(app_id) else "gpu_usage",
             )
             try:
-                await self._apps.unload(app_id)
+                # release(): unload (keep process) if the app supports
+                # load/unload, else stop it directly — an app without load/unload
+                # scripts cannot be unloaded, only stopped (frees the same VRAM).
+                await self._apps.release(app_id)
                 unloaded.append(app_id)
                 self._last_active.pop(app_id, None)
             except Exception:
