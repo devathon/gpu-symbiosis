@@ -44,6 +44,16 @@ class GpuBackend(Protocol):
 
     def process_utilization_pct(self, pid: int | None) -> float: ...
 
+    @property
+    def supports_process_utilization(self) -> bool:
+        """True if per-process *compute* utilization is available (NVML
+        ``nvmlDeviceGetProcessUtilization``, or the fake). When True, a
+        ``process_utilization_pct`` of 0.0 means the process is idle, so callers
+        must NOT fall back to device-level. When False, it always returns 0.0
+        and callers fall back to the device-level rate as a proxy.
+        """
+        ...
+
 
 class FakeGpuBackend:
     """Config-driven simulation for tests and the demo.
@@ -129,6 +139,11 @@ class FakeGpuBackend:
         app_id = self._pid_app.get(pid)
         return self._active_util.get(app_id, 0.0) if app_id else 0.0
 
+    @property
+    def supports_process_utilization(self) -> bool:
+        # The fake models per-process utilization via mark_active().
+        return True
+
 
 class NvmlBackend:
     """NVIDIA NVML backend (spec 16 §2.2: nvidia-ml-py)."""
@@ -155,12 +170,15 @@ class NvmlBackend:
             self._power_limit_w = pynvml.nvmlDeviceGetPowerManagementLimit(self._handle) / 1000.0
         except Exception:  # noqa: BLE001
             self._power_limit_w = None
-        # PCIe throughput counters are cumulative; keep the last reading.
-        self._pcie_prev: tuple[float, float, float] | None = None  # (rx, tx, t)
+        # Per-process utilization (nvmlDeviceGetProcessUtilization): a sliding
+        # window. `last_seen_timestamp` filters samples newer than the previous
+        # sample period; `proc_util` is the {pid: smUtil} map from the last
+        # period. `supports_proc_util` is set once a call succeeds (driver 525+).
+        self._last_util_ts: int = 0
+        self._proc_util: dict[int, float] = {}
+        self._supports_proc_util = False
 
     def sample(self) -> GpuSample:
-        import time
-
         pynvml = self._pynvml
         h = self._handle
         mem = pynvml.nvmlDeviceGetMemoryInfo(h)
@@ -177,23 +195,18 @@ class NvmlBackend:
             clock = float(pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_SM))
         except Exception:  # noqa: BLE001
             clock = None
+        # PCIe throughput: nvmlDeviceGetPcieThroughput returns an
+        # *instantaneous* rate in KB/s — NVML measures a byte counter over a
+        # fixed 20 ms window, it is NOT a cumulative counter (nvtop reads it
+        # directly, the same way). Convert KB/s → MB/s to match the
+        # rx_mbps/tx_mbps fields (spec 07 §2).
         rx = tx = None
         try:
-            rx_c = float(pynvml.nvmlDeviceGetPcieThroughput(h, getattr(pynvml, "NVML_PCIE_UTIL_RX_BYTES", 0x10000)))
-            tx_c = float(pynvml.nvmlDeviceGetPcieThroughput(h, getattr(pynvml, "NVML_PCIE_UTIL_TX_BYTES", 0x20000)))
-            now = time.monotonic()
-            if self._pcie_prev is not None:
-                prev_rx, prev_tx, prev_t = self._pcie_prev
-                dt = now - prev_t
-                if dt > 0.05:
-                    # The counters are cumulative 64-bit values; a driver reset
-                    # or counter wrap makes a reading *decrease* — clamp to 0
-                    # instead of reporting a negative rate.
-                    rx = max(0.0, rx_c - prev_rx) / dt / MB
-                    tx = max(0.0, tx_c - prev_tx) / dt / MB
-            self._pcie_prev = (rx_c, tx_c, now)
+            rx = float(pynvml.nvmlDeviceGetPcieThroughput(h, getattr(pynvml, "NVML_PCIE_UTIL_RX_BYTES", 0x10000))) / 1024.0
+            tx = float(pynvml.nvmlDeviceGetPcieThroughput(h, getattr(pynvml, "NVML_PCIE_UTIL_TX_BYTES", 0x20000))) / 1024.0
         except Exception:  # noqa: BLE001
-            self._pcie_prev = None
+            rx = tx = None
+        self._refresh_proc_util()
         return GpuSample(
             total_mb=mem.total / MB,
             used_mb=mem.used / MB,
@@ -221,9 +234,43 @@ class NvmlBackend:
                 return info.usedGpuMemory / MB
         return 0.0
 
+    @property
+    def supports_process_utilization(self) -> bool:
+        return self._supports_proc_util
+
+    def _refresh_proc_util(self) -> None:
+        """One ``nvmlDeviceGetProcessUtilization`` call per sample period,
+        mirroring nvtop: it returns samples for every process that used the GPU
+        since ``last_seen_timestamp``. Build the {pid: smUtil} map and advance
+        the window. A process absent from the map is idle (0%).
+
+        The API needs a recent driver (525+); on older drivers the call raises
+        and we keep ``_supports_proc_util`` False so callers fall back to the
+        device-level rate. Samples with util > 100 or a non-newer timestamp are
+        dropped (NVML bug #110, the same filter nvtop applies).
+        """
+        pynvml = self._pynvml
+        try:
+            samples = pynvml.nvmlDeviceGetProcessUtilization(self._handle, self._last_util_ts)
+        except Exception:  # noqa: BLE001 - API unavailable / transient
+            return
+        new_map: dict[int, float] = {}
+        max_ts = self._last_util_ts
+        for s in samples:
+            if s.timeStamp > self._last_util_ts and s.smUtil <= 100:
+                new_map[s.pid] = float(s.smUtil)
+                if s.timeStamp > max_ts:
+                    max_ts = s.timeStamp
+        self._proc_util = new_map
+        self._last_util_ts = max_ts
+        self._supports_proc_util = True
+
     def process_utilization_pct(self, pid: int | None) -> float:
-        # NVML does not expose per-process utilization on all drivers; 0.0.
-        return 0.0
+        """Per-process compute utilization (SM rate) from the last sample
+        period; 0.0 when the process is idle or unknown."""
+        if pid is None:
+            return 0.0
+        return self._proc_util.get(pid, 0.0)
 
     def set_loaded(self, app_id: str, memory_mb: float) -> None:
         """No-op on real hardware.

@@ -33,6 +33,7 @@ from gpusybio.resources.gpu import make_backend
 from gpusybio.resources.manager import ResourceManager
 from gpusybio.scheduler import Scheduler
 from gpusybio.scheduler.idle import IdleUnloader
+from gpusybio.scheduler.residency_monitor import ResidencyMonitor
 from gpusybio.state import StateManager
 
 log = get_logger("server")
@@ -110,6 +111,12 @@ class Server:
             default_idle_timeout_sec=float(config.settings.scheduler.idle_unload_timeout_sec),
             interval=float(config.settings.scheduler.idle_unload_interval_sec),
         )
+        # spec 06 §10: memory-based residency monitor — reconciles LOADED/UNLOADED
+        # when the app loads/frees its model outside GPUSymbiosis (e.g. ComfyUI).
+        self.residency_monitor = ResidencyMonitor(
+            self.resources, self.states, self.apps, self.bus,
+            self.app_ids, db=self.db,
+        )
         # gw_id -> (uvicorn.Server, serve task). The task is awaited on
         # re-spawn so the old listening socket is really closed before we
         # re-bind (spec 11 §3: re-saving a gateway must not fail with
@@ -140,9 +147,13 @@ class Server:
         from gpusybio.auth import verify_key as _verify_key
 
         db = self.db
+        # spec 05 §6: routing decision from the application type — which requests
+        # go through the scheduler vs pass through directly.
+        spec = self.metrics.type_registry.spec_for(app_cfg.application_type)
         return make_gateway_proxy(
             gw, self.request_manager, self.session, self.states, app_view,
             verify_key=lambda presented: _verify_key(db, gw_id, presented),
+            should_schedule=spec.should_schedule,
         )
 
     async def _spawn_gateway(self, gw_id: str) -> None:
@@ -237,6 +248,7 @@ class Server:
         self.scheduler.start()
         self.metrics.start()
         self.idle_unloader.start()
+        self.residency_monitor.start()
 
         # Wait for all listeners.
         try:
@@ -279,6 +291,7 @@ class Server:
             await self.scheduler.stop()
             await self.metrics.stop()
             await self.idle_unloader.stop()
+            await self.residency_monitor.stop()
         except Exception:  # noqa: BLE001
             pass
         if self.session is not None:

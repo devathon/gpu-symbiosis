@@ -220,7 +220,14 @@ type                 type name (spec 03 §4 enumeration)
 metrics              list[MetricDef]     ← what to record and display
 handler              TypeHandler | None  ← how to fetch (optional)
 defaults             type-default settings (scripts, readiness probe)
+should_schedule()    (method, path) -> bool  ← routing (spec 05 §6)
 ```
+
+`should_schedule` (default `True`) declares which requests go through the
+scheduler vs pass through directly (spec 05 §6). `comfyui` overrides it: only
+`POST /api/prompt` is scheduled; reads / static / the websocket pass through
+blindly. The app view also exposes `gpu_utilization_pct` alongside
+`gpu_memory_used_mb` (spec 04 §3 — RUNNING is based on GPU utilization).
 
 Built-in specs: `llama`, `ollama`, `comfyui`, `tts`, plus `generic` (fallback —
 always present). The `custom` type carries a user-declared spec from config

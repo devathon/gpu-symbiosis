@@ -65,6 +65,13 @@ class AppConfig:
     idle_unload_timeout_sec: int | None = None
     activity_detection_method: str = "gpu_usage"
     idle_threshold_gpu_pct: float = 5.0
+    # Application type (spec 08 §9) — drives the metrics spec AND the routing
+    # decision (should_schedule, spec 05 §6).
+    application_type: str = "custom"
+    # Memory-based residency monitor (spec 06 §10): LOADED while VRAM >= load
+    # threshold, UNLOADED while < unload threshold (hysteresis).
+    memory_load_threshold_pct: float = 80.0
+    memory_unload_threshold_pct: float = 20.0
     # Measured timings (spec 11 §2.3: auto-calculated; feed switch cost, spec 06 §11).
     startup_time_sec: float | None = None
     load_time_sec: float | None = None
@@ -112,6 +119,9 @@ class AppConfig:
             idle_unload_timeout_sec=row.idle_unload_timeout_sec,
             activity_detection_method=row.activity_detection_method or "gpu_usage",
             idle_threshold_gpu_pct=row.idle_threshold_gpu_pct if row.idle_threshold_gpu_pct is not None else 5.0,
+            application_type=row.application_type or "custom",
+            memory_load_threshold_pct=row.memory_load_threshold_pct if row.memory_load_threshold_pct is not None else 80.0,
+            memory_unload_threshold_pct=row.memory_unload_threshold_pct if row.memory_unload_threshold_pct is not None else 20.0,
         )
 
 

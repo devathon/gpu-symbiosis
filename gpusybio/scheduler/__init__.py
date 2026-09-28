@@ -38,7 +38,14 @@ from gpusybio.events.bus import (
 from gpusybio.events.log import get_logger
 from gpusybio.gateway.request_manager import RequestManager
 from gpusybio.resources.manager import ResourceManager
-from gpusybio.scoring import EPS, gateway_score, is_emergency, normalized_demand, switch_cost
+from gpusybio.scoring import (
+    EPS,
+    gateway_score,
+    is_emergency,
+    normalized_demand,
+    switch_cost,
+    switching_penalty,
+)
 from gpusybio.state import StateManager
 
 log = get_logger("scheduler")
@@ -466,19 +473,29 @@ class Scheduler:
                     detail=f"{victim.id} draining ({vs.active_requests} active)",
                     scores=csc, active=victim.id, guards=guards,
                 )
-            if vs.active_requests > 0:
+            if self._is_active(victim.id):
                 if not self._dry_run:
                     self._states.set_draining(victim.id, True)
                     await self._emit("DRAIN_START", application_id=victim.id)
                 return await self._decide(
                     trigger, cand, None, "drain", csc["score"], 0.0, cur_sc,
-                    detail=f"{victim.id} draining ({vs.active_requests} active)",
+                    detail=f"{victim.id} active ({vs.active_requests} requests)",
                     scores=csc, active=victim.id, guards=guards,
                 )
 
             # -- victim idle: final margin comparison (spec 06 §13/§14) -------------
             cost = self._switch_cost(victim, app_id)
-            penalty = cost * float(sched.switch_cost_weight)
+            # The cost is in seconds; the score is a normalized pressure whose
+            # waiting term is oldest_wait / max_wait (§6.9). Normalize the cost
+            # by the candidate gateway's max_waiting_time_sec — the same time
+            # horizon — so the penalty lands on the score's scale instead of
+            # raw seconds, which would dwarf it by ~max_wait× (spec 06 §11).
+            time_scale = float(
+                self._rm.gateway(cand["gateway_id"])["max_waiting_time_sec"]
+            )
+            penalty = switching_penalty(
+                cost, time_scale, float(sched.switch_cost_weight)
+            )
             effective = csc["score"] - penalty
             margin = float(sched.switch_margin)
             if effective > cur_sc + margin:
@@ -527,6 +544,21 @@ class Scheduler:
             needs_startup,
             needs_load,
         )
+
+    def _is_active(self, app_id: str) -> bool:
+        """spec 04 §3: the single ``active`` definition — serving a request OR
+        using the GPU. Used by the eviction guard so a RUNNING no-gateway app
+        (high GPU utilisation, no request rows) is never evicted mid-work."""
+        from gpusybio.scheduler.activity import is_active
+
+        s = self._states.get(app_id)
+        if s is None:
+            return False
+        try:
+            threshold = self._apps.config(app_id).idle_threshold_gpu_pct
+        except Exception:  # noqa: BLE001
+            threshold = None
+        return is_active(s, self._resources, threshold)
 
     def _select_victim(self, exclude: str) -> tuple[AppConfig | None, str]:
         """Unload candidate selection (spec 06 §3).

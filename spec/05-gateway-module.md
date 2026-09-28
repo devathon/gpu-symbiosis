@@ -116,11 +116,31 @@ application is doing.
 
 ## 6. Request Lifecycle
 
+### 6.0 Routing Decision
+
+Not every request that reaches a gateway goes through the scheduler. The
+application's **type** declares which requests are *scheduled* (go through
+queue / load-balancing / demand) and which *pass through directly* (spec 08 §9,
+`TypeSpec.should_schedule`):
+
+- **Scheduled** (default; e.g. LLM `POST /api/chat`): the request is enqueued,
+  the scheduler decides (forward / load / unload), and it is counted in demand.
+- **Pass-through** (e.g. ComfyUI `GET /api/system_stats`, static assets, the
+  websocket): the request is **forwarded directly — blindly, even while the app
+  is stopped**, bypassing the scheduler. No request row is created (it is exempt
+  from gateway intake — it is plain proxy traffic, not a scheduled unit of
+  work), so it does not count in demand.
+
+The decision is made after auth (an invalid key is still rejected) but before
+intake, so pass-through requests never enter the queue.
+
 ```text
 REQUEST RECEIVED
        ↓
 Validate gateway (enabled? queue full? → 429/503)
        ↓
+should_schedule?  ── no ──→ Forward directly (no request row) → Complete
+       ↓ yes
 Create request (QUEUED)
        ↓
 Queue request

@@ -374,6 +374,36 @@ A1 request arrives
 → ComfyUI → UNLOADING, A1 → LOADING
 ```
 
+### 10.1 The `active` signal (single definition)
+
+The single "is the app doing work" signal is computed once and consumed by the
+display, the scheduler, and the idle-unloader (spec 04 §3):
+
+```text
+active = serving a request (active_requests > 0)
+       OR using the GPU (utilization >= idle_threshold_gpu)
+```
+
+If **either** is on, the app is active. The scheduler's eviction guard uses this
+so a **RUNNING** no-gateway app (high GPU utilization, no request rows) is never
+evicted mid-work — an app that is idle (both signals off) is the only one that
+may be unloaded.
+
+### 10.2 Memory-based residency monitor
+
+Some applications (e.g. ComfyUI) load and free their model *outside*
+GPUSymbiosis. A background monitor watches each app's per-process GPU memory and
+reconciles the residency state (spec 04 §3 — LOADED is based on VRAM):
+
+```text
+LOADED  and VRAM < memory_unload_threshold (default 20% of configured)  → UNLOADED
+OFF     and VRAM >= memory_load_threshold (default 80% of configured)   → LOADED
+```
+
+The wide hysteresis band (80% / 20%) prevents flapping near a single threshold.
+Only apps that support load/unload are tracked. The monitor publishes the state
+change (UNLOADED / LOAD_READY) so the scheduler and UI react.
+
 ## 11. Switching Cost
 
 ```text
@@ -407,10 +437,16 @@ estimated_switch_cost =
 ```
 
 ```text
-switching_penalty = estimated_switch_cost × SWITCH_COST_WEIGHT
+switching_penalty = (estimated_switch_cost / GATEWAY.max_waiting_time_sec)
+                    × SWITCH_COST_WEIGHT
 ```
 
-Costs are measured in seconds (or a configurable time-to-score scale).
+Costs are measured in seconds, then normalized by the candidate gateway's time
+horizon (`max_waiting_time_sec`) — the same scale the score's waiting term
+already uses (`oldest_wait / max_wait`, §6.9) — so the penalty lands on the
+score's scale. Subtracting raw seconds from a normalized score would inflate
+the penalty by roughly `max_wait`× (a 6 s startup against a ~1 score), making
+it impossible to ever switch to a stopped application.
 
 **Zero-cost case.** If the candidate application is already resident, no
 application is removed and nothing is started or loaded, therefore:
@@ -449,10 +485,11 @@ Switch only when the candidate is significantly better.
 ```text
 candidate_score = gateway_score(candidate)
 
-switching_penalty = estimated_switch_cost(
+switching_penalty = (estimated_switch_cost(
                         active_applications_to_unload,
                         candidate
-                    ) × SWITCH_COST_WEIGHT
+                    ) / candidate.max_waiting_time_sec)
+                    × SWITCH_COST_WEIGHT          # §11: normalized to the score's scale
 
 effective_candidate_score = candidate_score - switching_penalty
 

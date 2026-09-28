@@ -204,3 +204,39 @@ def test_supports_load_unload_derived_from_unload_script(tmp_path):
         row.unload_script = None
         row.supports_load_unload = True
     assert AppConfig.from_row(row).supports_load_unload is False
+
+
+def test_column_drift_migration_backfills_defaults(tmp_path):
+    """Schema evolution (spec 16): a DB created before a column was added is
+    upgraded in place — ``ALTER TABLE ... ADD COLUMN`` with the model's scalar
+    default, back-filled onto existing rows. Replicates the production
+    failure: pre-existing DB + new model column → 'no such column' on read."""
+    import sqlite3
+
+    path = str(tmp_path / "preexisting.db")
+    con = sqlite3.connect(path)
+    # The applications table as it existed BEFORE memory_load/unload were added:
+    # a subset of columns, one existing row.
+    con.execute(
+        "CREATE TABLE applications ("
+        "id TEXT PRIMARY KEY, name TEXT, start_script TEXT, stop_script TEXT,"
+        " port INTEGER, application_type TEXT DEFAULT 'custom',"
+        " configured_gpu_memory_mb INTEGER, idle_threshold_gpu_pct REAL DEFAULT 5.0)"
+    )
+    con.execute("INSERT INTO applications (id, name, port, configured_gpu_memory_mb)"
+                " VALUES ('a1', 'qwen38', 9501, 18432)")
+    con.commit()
+    con.close()
+
+    engine = create_engine(path)
+    init_db(engine)  # create_all is a no-op for the existing table; the
+    # column-drift step adds the missing model columns.
+    db = make_session_factory(engine)
+
+    with db() as s:
+        row = s.get(Application, "a1")  # the exact read that failed in prod
+        assert row is not None
+        assert row.memory_load_threshold_pct == 80.0
+        assert row.memory_unload_threshold_pct == 20.0
+        assert row.idle_threshold_gpu_pct == 5.0  # pre-existing column untouched
+        assert row.name == "qwen38"

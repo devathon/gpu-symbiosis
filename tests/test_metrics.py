@@ -112,6 +112,18 @@ def test_type_registry_builtin_and_custom():
     assert reg.spec_for("custom", None).type == "generic"
 
 
+def test_should_schedule_routing():
+    """spec 05 §6: the application type declares which requests are scheduled."""
+    from gpusybio.metrics.typespec import COMFYUI_SPEC, TypeSpec
+    # comfyui: only the prompt-submission endpoint is scheduled
+    assert COMFYUI_SPEC.should_schedule("POST", "/api/prompt") is True
+    assert COMFYUI_SPEC.should_schedule("GET", "/api/system_stats") is False
+    assert COMFYUI_SPEC.should_schedule("GET", "/") is False
+    # default type: everything is scheduled
+    assert TypeSpec("llama").should_schedule("POST", "/api/chat") is True
+    assert TypeSpec("generic").should_schedule("GET", "/anything") is True
+
+
 def test_common_metrics_present():
     ids = [m.id for m in COMMON_METRICS]
     assert "p95_wait_sec" in ids

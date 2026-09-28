@@ -80,6 +80,16 @@ def switch_cost(
     return cost
 
 
+def switching_penalty(cost: float, time_scale: float, weight: float) -> float:
+    """spec 06 §11: the raw switching cost (seconds) is normalized by the
+    candidate gateway's time horizon (``max_waiting_time_sec``) — the same
+    scale the score's waiting term already uses (``oldest_wait / max_wait``,
+    §6.9) — then multiplied by the weight. This keeps the penalty on the
+    score's scale instead of raw seconds, which would dwarf it by roughly
+    ``max_wait``× (a 6 s startup against a ~1 score)."""
+    return (cost / max(1.0, time_scale)) * weight
+
+
 def is_emergency(
     oldest_wait: float,
     queue_len: int,

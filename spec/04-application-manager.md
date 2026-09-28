@@ -61,28 +61,40 @@ per application** may be in flight at a time — `LOADING` can never overlap `UN
 
 ## 3. Combined UI State
 
-The UI exposes a simplified projection:
+The UI exposes a simplified projection. The steady states are **four**; the
+transient states are shown only while a transition is in flight.
 
 ```text
-OFF
-STARTING
-LOADING
-LOADED
-PROCESSING
+STOPPED
 IDLE
-DRAINING
-UNLOADING
-STOPPING
-ERROR
+IDLE & LOADED
+RUNNING
+
+(transients) STARTING  LOADING  UNLOADING  DRAINING  STOPPING  ERROR
 ```
 
-Where:
+Where the three distinct steady states for an up app are:
 
-- `PROCESSING` = LOADED and `active_requests > 0`
-- `IDLE` = LOADED, `active_requests = 0`, and (for non-API apps) activity below threshold
-- `DRAINING` = LOADED, no new requests accepted, `active_requests` draining toward 0
+- **STARTED** (process up, model not loaded) → shown as `IDLE`
+- **LOADED** (model resident, not active) → shown as `IDLE & LOADED`
+- **RUNNING** (active) → shown as `RUNNING`
 
-Internally, process and residency states remain separate.
+`active` (spec 06 §10) is the single "is the app doing work" signal, computed
+once and consumed by the display, the scheduler, and the idle-unloader:
+
+```text
+active = serving a request (active_requests > 0)  OR  using the GPU (utilization >= threshold)
+```
+
+so **if either is on, the app is active**. `active` drives the `RUNNING` state
+(RUNNING is based on GPU utilization; LOADED is based on VRAM / residency).
+`DRAINING` = active, no new requests accepted, `active_requests` draining toward 0.
+
+Apps that do not support load/unload omit the `LOADED` state (their residency is
+always OFF): they show only `STOPPED` / `IDLE` / `RUNNING`.
+
+Internally, process and residency states remain separate; `combined_ui_state`
+projects them plus the `active` flag into the display states above.
 
 ## 4. Lifecycle Operations
 

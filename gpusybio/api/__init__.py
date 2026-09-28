@@ -57,17 +57,23 @@ class AuthBody(BaseModel):
 
 
 def _app_view(row: Application, state, resources) -> dict:
+    from gpusybio.scheduler.activity import is_active
+
+    util = round(resources.app_utilization(row.id), 1)
+    active = is_active(state, resources, row.idle_threshold_gpu_pct)
     return {
         "id": row.id,
         "name": row.name,
         "description": row.description,
         "process_state": state.process.value,
         "residency_state": state.residency.value,
-        "state": combined_ui_state(state),
+        "state": combined_ui_state(state, active),
+        "active": active,
         "pid": state.pid,
         "draining": state.draining,
         "active_requests": state.active_requests,
         "queued_requests": state.queued_requests,
+        "gpu_utilization_pct": util,
         "gpu_memory_used_mb": round(resources.observed_mb(row.id), 1),
         "gpu_memory_configured_mb": row.configured_gpu_memory_mb,
         "gpu_memory_effective_mb": row.effective_gpu_memory_mb,
@@ -96,6 +102,8 @@ def _app_view(row: Application, state, resources) -> dict:
         "idle_unload_timeout_sec": row.idle_unload_timeout_sec,
         "activity_detection_method": row.activity_detection_method,
         "idle_threshold_gpu_pct": row.idle_threshold_gpu_pct,
+        "memory_load_threshold_pct": row.memory_load_threshold_pct,
+        "memory_unload_threshold_pct": row.memory_unload_threshold_pct,
     }
 
 

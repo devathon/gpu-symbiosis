@@ -27,6 +27,50 @@ def create_engine(db_path: str) -> Engine:
 
 def init_db(engine: Engine) -> None:
     models.Base.metadata.create_all(engine)
+    _migrate_columns(engine)
+
+
+def _scalar_default(col):
+    """A DDL-safe scalar default (int/float/str/bool), or None if the column
+    has no scalar default (function defaults are left to the ORM layer)."""
+    d = col.default
+    if d is None or not d.is_scalar:
+        return None
+    arg = d.arg
+    if isinstance(arg, (bool, int, float, str)) and not isinstance(arg, type):
+        return arg
+    return None
+
+
+def _migrate_columns(engine: Engine) -> None:
+    """Schema evolution for the single local DB (spec 16): ``create_all``
+    creates missing tables but never adds columns to existing ones (no alembic).
+    Introspect each table and ``ALTER TABLE ... ADD COLUMN`` any model column
+    that is missing yet, carrying its type and scalar default — SQLite
+    back-fills existing rows with that default on add.
+    """
+    from sqlalchemy import inspect, text
+
+    if engine.dialect.name != "sqlite":
+        return
+    existing = inspect(engine)
+    tables = existing.get_table_names()
+    for table in models.Base.metadata.tables.values():
+        if table.name not in tables:
+            continue
+        have = {c["name"] for c in existing.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in have or col.primary_key:
+                continue
+            ddl = f"{col.name} {col.type.compile(dialect=engine.dialect)}"
+            default = _scalar_default(col)
+            if default is not None:
+                if isinstance(default, str):
+                    ddl += f" DEFAULT '{default.replace(chr(39), chr(39) * 2)}'"
+                else:
+                    ddl += f" DEFAULT {default}"
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {ddl}"))
 
 
 def make_session_factory(engine: Engine) -> "SessionFactory":

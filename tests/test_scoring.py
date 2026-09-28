@@ -15,6 +15,7 @@ from gpusybio.scoring import (
     is_emergency,
     normalized_demand,
     switch_cost,
+    switching_penalty,
 )
 
 
@@ -80,6 +81,18 @@ def test_switch_cost_06_11():
     assert switch_cost([], None, None, False, False) == 0.0
     # unmeasured timings count as 0, not an error
     assert switch_cost([None, 0.0], None, None, False, True) == 0.0
+
+
+def test_switching_penalty_06_11():
+    # spec 06 §11: cost (seconds) normalized by the gateway time horizon,
+    # so the penalty lands on the score's scale, not raw seconds.
+    assert abs(switching_penalty(6.0, 300.0, 1.0) - 0.02) < 1e-9
+    # weight scales the normalized penalty
+    assert abs(switching_penalty(6.0, 300.0, 0.5) - 0.01) < 1e-9
+    # a time scale below 1s is clamped to 1 (no division blow-up)
+    assert abs(switching_penalty(6.0, 0.5, 1.0) - 6.0) < 1e-9
+    # zero cost → zero penalty (already-resident path)
+    assert switching_penalty(0.0, 300.0, 1.0) == 0.0
 
 
 def test_emergency_06_15():

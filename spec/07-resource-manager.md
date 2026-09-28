@@ -49,6 +49,12 @@ temperature
 power
 ```
 
+PCIe throughput (`rx_mbps`, `tx_mbps`) is read directly from
+`nvmlDeviceGetPcieThroughput`, which returns an **instantaneous rate in KB/s**
+— NVML measures a byte counter over a fixed 20 ms window, so the value is
+already a rate, *not* a cumulative counter. We convert to MB/s for the API/UI
+and read it the same way nvtop does (no diffing, no divide-by-interval).
+
 ## 3. Process GPU Attribution
 
 Map `PID → GPU memory` using NVML process information:
@@ -67,6 +73,29 @@ application_gpu_memory = Σ process_gpu_memory
 
 Process sets are resolved from the tracked root PID plus child discovery (cgroup or
 process-tree walk); attribution is refreshed every metrics interval.
+
+### Per-process GPU utilization (the RUNNING signal)
+
+Per-process *compute* utilization — the RUNNING signal (spec 04 §3) — is read with
+NVML `nvmlDeviceGetProcessUtilization(device, last_seen_timestamp)`, which returns a
+sample per process that used the GPU since the timestamp:
+`{pid, timeStamp, smUtil, memUtil, encUtil, decUtil}`. The per-process GPU % is
+`smUtil` (the SM / compute rate). The backend makes **one call per sampling period**
+(refreshed every tick), keeps a `{pid: smUtil}` map, and advances the timestamp to the
+latest sample seen; a process absent from the map is idle (0%).
+
+Notes:
+- The API needs a recent driver (525+). On older drivers the call is unavailable and
+  the backend reports `supports_process_utilization = False`, so the resource manager
+  falls back to the device-level rate (`nvmlDeviceGetUtilizationRates`) as a proxy.
+- When per-process is supported, a 0.0 value means *idle*, not *unknown* — so there is
+  deliberately no device-level fallback (which would mis-attribute a co-resident app's
+  load to an idle app).
+- An app with **no PID** (stopped / never started) always reads 0.0 — the device-level
+  rate is never attributed to it, so a stopped app can never look "active" because a
+  co-resident app is busy (the multi-app mis-attribution guard).
+- Samples with `smUtil > 100` or a non-newer timestamp are dropped (NVML bug #110, the
+  same filter nvtop applies).
 
 Unattributable GPU memory (other users' processes, desktop, drivers) is accounted
 as **external usage** and reduces available VRAM:

@@ -9,6 +9,7 @@ from the application's config; ``generic`` is the fallback.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 
 @dataclass
@@ -33,6 +34,12 @@ class TypeSpec:
             if m.id == metric_id:
                 return m
         return None
+
+    # spec 05 §6: which requests go through the scheduler (queue / LB / demand)
+    # vs pass through directly (blindly, even while the app is stopped).
+    # Default: everything is scheduled.
+    def should_schedule(self, method: str, path: str) -> bool:
+        return True
 
 
 # -- built-in specs (spec 08 §5/§9) -------------------------------------------
@@ -63,7 +70,18 @@ OLLAMA_SPEC = TypeSpec("ollama", [
               aggregation="avg"),
 ])
 
-COMFYUI_SPEC = TypeSpec("comfyui", [
+class ComfyUISpec(TypeSpec):
+    """ComfyUI (spec 05 §6): only the prompt-submission endpoint goes through
+    the scheduler; reads / static / websocket pass through directly. The set is
+    a class attribute so it can be extended without subclassing again."""
+
+    scheduled_endpoints: ClassVar[set[tuple[str, str]]] = {("POST", "/api/prompt")}
+
+    def should_schedule(self, method: str, path: str) -> bool:
+        return (method.upper(), path) in self.scheduled_endpoints
+
+
+COMFYUI_SPEC = ComfyUISpec("comfyui", [
     MetricDef("queue_depth", "Queue depth", "gauge", "req", "handler", "card"),
     MetricDef("progress", "Progress", "gauge", "%", "handler", "card"),
     MetricDef("is_active", "Active", "text", "", "handler", "card"),

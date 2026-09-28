@@ -232,6 +232,29 @@ async def _req_running(c, app_id):
     return v["process_state"] == "RUNNING" and v["residency_state"] == "LOADED"
 
 
+async def test_app_view_exposes_gpu_utilization_and_state(server):
+    """The app view exposes gpu_utilization_pct, active, and the display state
+    (spec 04 §3): RUNNING when active, IDLE & LOADED when resident but idle,
+    IDLE when up but not loaded."""
+    c = httpx.AsyncClient()
+    url = f"http://127.0.0.1:{ADMIN_PORT}/api/applications/a1"
+    # stopped
+    v = (await c.get(url)).json()
+    assert v["process_state"] == "STOPPED"
+    assert v["state"] == "STOPPED"
+    assert "gpu_utilization_pct" in v
+    assert "active" in v
+    assert "memory_load_threshold_pct" in v
+    assert "memory_unload_threshold_pct" in v
+    # start (up) → the display state is one of the steady/transient states
+    await c.post(f"http://127.0.0.1:{ADMIN_PORT}/api/applications/a1/start")
+    await _wait(lambda: _req_running(c, "a1"))
+    v = (await c.get(url)).json()
+    assert v["process_state"] == "RUNNING"
+    assert v["residency_state"] == "LOADED"
+    assert v["state"] in ("IDLE & LOADED", "RUNNING", "DRAINING")
+
+
 async def _long_request(c):
     # ~3s of streaming: holds a1's single concurrent slot.
     await c.post(f"http://127.0.0.1:{A1_GW}/generate",

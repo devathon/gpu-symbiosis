@@ -87,12 +87,19 @@ def make_gateway_proxy(
     app_state,
     app_cfg,
     verify_key=None,
+    should_schedule=None,
 ):
     """Build the ASGI app for one gateway port.
 
     ``verify_key`` (optional, spec 12 §2) is a callable ``presented_key -> bool``
     checked **before** queueing: an invalid key → 401 and the request never
     enters the queue.
+
+    ``should_schedule`` (optional, spec 05 §6) is a callable
+    ``(method, path) -> bool``: when it returns ``False`` the request is
+    forwarded directly (no intake row, no queue, no demand) — even while the
+    app is stopped. ``None`` (the default) keeps the existing behaviour (every
+    request goes through the scheduler).
     """
     gateway_id = gateway["id"]
     app_id = gateway["application_id"]
@@ -190,6 +197,18 @@ def make_gateway_proxy(
             await _send_error(send, 503, "gateway disabled")
             return
 
+        # Routing (spec 05 §6): a request the application type marks as
+        # pass-through is forwarded directly — no intake row, no queue, no
+        # demand — even while the app is stopped.
+        path = scope.get("path")
+        if isinstance(path, bytes):
+            path = path.decode()
+        if should_schedule is not None and not should_schedule(
+            scope.get("method", "GET"), path
+        ):
+            await _forward_direct(scope, send, body, receive)
+            return
+
         # 1. Intake: always create the request row (metrics + Invariant 5).
         slot = await request_manager.receive(gateway_id, metadata={
             "method": scope.get("method"),
@@ -270,7 +289,8 @@ def make_gateway_proxy(
                     await stream_task
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
-                await request_manager.cancel(request_id)
+                if request_id is not None:
+                    await request_manager.cancel(request_id)
                 return
             disconnect_task.cancel()
             exc = stream_task.exception()
@@ -280,16 +300,35 @@ def make_gateway_proxy(
                     await _send_error(send, 502, "upstream error")
                 except Exception:  # noqa: BLE001
                     pass
-                await request_manager.complete(request_id, error=str(exc)[:200])
+                if request_id is not None:
+                    await request_manager.complete(request_id, error=str(exc)[:200])
             else:
                 await send({"type": "http.response.body", "body": b""})
-                await request_manager.complete(
-                    request_id, error=None if status < 500 else f"upstream {status}",
-                    input_tokens=in_tok, output_tokens=out_tok,
-                )
+                if request_id is not None:
+                    await request_manager.complete(
+                        request_id, error=None if status < 500 else f"upstream {status}",
+                        input_tokens=in_tok, output_tokens=out_tok,
+                    )
         finally:
             try:
                 resp.close()  # sync in aiohttp 3.13
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _forward_direct(scope, send, body: bytes, receive):
+        """Direct forward (spec 05 §6): pass-through requests (reads, static,
+        websocket) bypass the scheduler — no intake row, no queue, no demand."""
+        try:
+            status, resp = await _forward(scope, send, body, None)
+            if resp is not None:
+                tokens = _token_headers(resp)
+                await _stream(send, resp, receive, None, status, tokens)
+        except (asyncio.CancelledError,):
+            raise
+        except Exception as e:  # noqa: BLE001 - upstream unreachable etc.
+            log.warning("direct forward failed", error=str(e))
+            try:
+                await _send_error(send, 502, "upstream unreachable")
             except Exception:  # noqa: BLE001
                 pass
 

@@ -12,6 +12,7 @@ export interface AppView {
   draining: boolean;
   active_requests: number;
   queued_requests: number;
+  gpu_utilization_pct: number;
   gpu_memory_used_mb: number;
   gpu_memory_configured_mb: number;
   gpu_memory_effective_mb: number;

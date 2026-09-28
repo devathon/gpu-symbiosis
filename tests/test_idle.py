@@ -76,6 +76,9 @@ class StubResources:
 
         self.backend = _B()
 
+    def app_utilization(self, app_id):
+        return self.util
+
 
 class StubRM:
     def __init__(self, gw_app=None, queued=0):
@@ -145,6 +148,96 @@ def test_non_api_app_active_by_gpu():
     assert u.is_active("c1") is True  # GPU 80% >= threshold
 
 
+# -- unit: the single `active` definition (spec 04 §3) ------------------------
+def test_is_active_running_only():
+    """GPU high, no requests → active (a RUNNING no-gateway app)."""
+    states = StateManager()
+    load_app(states, "c1")
+    res = StubResources(util=80.0)  # GPU 80% >= 5% threshold
+    assert res.app_utilization("c1") >= res.gpu_activity_threshold_pct
+    from gpusybio.scheduler.activity import is_active
+    assert is_active(states.get("c1"), res, 5.0) is True
+
+
+def test_is_active_serving_only():
+    """Serving a request, GPU low → active."""
+    states = StateManager()
+    load_app(states, "a1", active=1)  # active_requests = 1, GPU 0%
+    res = StubResources(util=0.0)
+    from gpusybio.scheduler.activity import is_active
+    assert is_active(states.get("a1"), res, 5.0) is True
+
+
+def test_is_active_idle():
+    """GPU low, no requests → not active."""
+    states = StateManager()
+    load_app(states, "a1", active=0)
+    res = StubResources(util=0.0)
+    from gpusybio.scheduler.activity import is_active
+    assert is_active(states.get("a1"), res, 5.0) is False
+
+
+# -- unit: display state mapping (spec 04 §3) ---------------------------------
+def test_display_stopped():
+    from gpusybio.applications.lifecycle import (
+        AppState, ProcessState, ResidencyState, combined_ui_state,
+    )
+    s = AppState(app_id="a", process=ProcessState.STOPPED, residency=ResidencyState.OFF)
+    assert combined_ui_state(s, False) == "STOPPED"
+
+
+def test_display_idle_started():
+    """Up, model not loaded (residency OFF), not active → IDLE (STARTED)."""
+    from gpusybio.applications.lifecycle import (
+        AppState, ProcessState, ResidencyState, combined_ui_state,
+    )
+    s = AppState(app_id="a", process=ProcessState.RUNNING, residency=ResidencyState.OFF)
+    assert combined_ui_state(s, False) == "IDLE"
+
+
+def test_display_running():
+    """Active (serving or GPU) → RUNNING."""
+    from gpusybio.applications.lifecycle import (
+        AppState, ProcessState, ResidencyState, combined_ui_state,
+    )
+    s = AppState(app_id="a", process=ProcessState.RUNNING, residency=ResidencyState.LOADED)
+    assert combined_ui_state(s, True) == "RUNNING"
+    # a no-load/unload app (residency OFF) that is active is also RUNNING
+    s2 = AppState(app_id="a", process=ProcessState.RUNNING, residency=ResidencyState.OFF)
+    assert combined_ui_state(s2, True) == "RUNNING"
+
+
+def test_display_idle_loaded():
+    """Model resident (LOADED) but not active → IDLE & LOADED."""
+    from gpusybio.applications.lifecycle import (
+        AppState, ProcessState, ResidencyState, combined_ui_state,
+    )
+    s = AppState(app_id="a", process=ProcessState.RUNNING, residency=ResidencyState.LOADED)
+    assert combined_ui_state(s, False) == "IDLE & LOADED"
+
+
+def test_display_transients_preserved():
+    from gpusybio.applications.lifecycle import (
+        AppState, ProcessState, ResidencyState, combined_ui_state,
+    )
+    assert combined_ui_state(
+        AppState(app_id="a", process=ProcessState.STARTING), False) == "STARTING"
+    assert combined_ui_state(
+        AppState(app_id="a", process=ProcessState.STOPPING), False) == "STOPPING"
+    assert combined_ui_state(
+        AppState(app_id="a", process=ProcessState.RUNNING,
+                 residency=ResidencyState.LOADING), False) == "LOADING"
+    assert combined_ui_state(
+        AppState(app_id="a", process=ProcessState.RUNNING,
+                 residency=ResidencyState.UNLOADING), False) == "UNLOADING"
+    assert combined_ui_state(
+        AppState(app_id="a", process=ProcessState.ERROR), False) == "ERROR"
+    # DRAINING (active + draining)
+    s = AppState(app_id="a", process=ProcessState.RUNNING,
+                 residency=ResidencyState.LOADED, draining=True)
+    assert combined_ui_state(s, True) == "DRAINING"
+
+
 # -- unit: hard exclusions (spec 06 §3.1) -------------------------------------
 async def test_pinned_never_auto_unloaded():
     states = StateManager()
@@ -170,6 +263,37 @@ async def test_allow_automatic_unload_false_never_unloaded():
     await asyncio.sleep(1.1)
     unloaded = await u.tick()
     assert unloaded == []
+
+
+async def test_active_app_not_unloaded():
+    """An active app (GPU high, spec 04 §3) is never auto-unloaded — the
+    unified `active` signal (requests OR GPU) suppresses the unload."""
+    states = StateManager()
+    load_app(states, "c1")  # no gateway -> non-API
+    apps = StubApps({"c1": StubApp()})
+    rm = StubRM()
+    res = StubResources(util=80.0)  # GPU 80% >= 5% threshold -> active
+    u = make_unloader(apps, states, rm, res, StubBus(), ["c1"], [],
+                      min_residency=0.0, idle_timeout=1.0)
+    await asyncio.sleep(1.1)
+    unloaded = await u.tick()
+    assert unloaded == []
+    assert apps.config("c1").unloaded == []
+
+
+async def test_idle_app_unloaded():
+    """An idle app (GPU low, no requests) is auto-unloaded (spec 06 §10)."""
+    states = StateManager()
+    load_app(states, "c1")  # no gateway, loaded long ago
+    apps = StubApps({"c1": StubApp()})
+    rm = StubRM()
+    res = StubResources(util=0.0)  # GPU 0% -> idle
+    u = make_unloader(apps, states, rm, res, StubBus(), ["c1"], [],
+                      min_residency=0.0, idle_timeout=1.0)
+    await asyncio.sleep(1.1)
+    unloaded = await u.tick()
+    assert "c1" in unloaded
+    assert "c1" in apps.config("c1").unloaded
 
 
 # -- unit: minimum residency ---------------------------------------------------

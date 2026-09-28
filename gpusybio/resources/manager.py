@@ -127,6 +127,28 @@ class ResourceManager:
             return self._reservations[app_id].required_mb
         return self._live.get(app_id, 0.0)
 
+    def app_utilization(self, app_id: str) -> float:
+        """Per-app GPU utilization (spec 04 §3: the RUNNING signal).
+
+        No PID means no process (stopped) → 0.0, never a device-level proxy
+        (which would mis-attribute a co-resident app's load to a stopped one).
+        With a PID: when the backend exposes per-process utilization (NVML
+        ``nvmlDeviceGetProcessUtilization``, or the fake) this is the
+        per-process compute rate — a value of 0.0 means the app is *idle*, so
+        there is deliberately no device-level fallback. Only when the backend
+        has no per-process support is the device-level rate used as a proxy.
+        """
+        pid = self._pids.get(app_id)
+        if pid is None:
+            return 0.0
+        if getattr(self._backend, "supports_process_utilization", False):
+            try:
+                return float(self._backend.process_utilization_pct(pid) or 0.0)
+            except Exception:  # noqa: BLE001
+                return 0.0
+        # Running app, but no per-process support: device-level is the proxy.
+        return float((self._last_sample or self.sample()).utilization_pct or 0.0)
+
     # -- fit check (spec 06 §7) --------------------------------------------
     def required_for(self, configured_mb: float, safety_margin: float | None = None) -> float:
         margin = self._safety_margin if safety_margin is None else safety_margin

@@ -102,11 +102,12 @@ class IdleUnloader:
             return self._resources.gpu_activity_threshold_pct
 
     def is_active(self, app_id: str) -> bool:
-        """True if the app is currently doing work (API: requests; else GPU)."""
-        s = self._states.get(app_id)
-        if self._has_gateway(app_id):
-            return s.active_requests > 0
-        return self._app_gpu_util(app_id) >= self._threshold(app_id)
+        """True if the app is active: serving a request OR using the GPU
+        (spec 04 §3) — the single ``active`` definition, shared with the
+        display and the scheduler."""
+        from gpusybio.scheduler.activity import is_active
+
+        return is_active(self._states.get(app_id), self._resources, self._threshold(app_id))
 
     def last_active(self, app_id: str) -> float | None:
         """Last timestamp the app was observed active (None if never seen active)."""

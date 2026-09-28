@@ -26,14 +26,23 @@ export default function AppCards({
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="font-medium">{a.name}</span>
-                {badge(a.process_state)}
-                {badge(a.residency_state)}
+                {/* Combined state (spec 04 §3): RUNNING (busy) is one badge;
+                    idle-but-loaded renders as TWO badges (IDLE + LOADED), both
+                    orange; everything else (IDLE, STOPPED, STARTING, ...) is one. */}
+                {a.state === "IDLE & LOADED" ? (
+                  <>
+                    <span className="rounded bg-orange-900/60 px-1.5 py-0.5 text-xs text-orange-300">IDLE</span>
+                    <span className="rounded bg-orange-900/60 px-1.5 py-0.5 text-xs text-orange-300">LOADED</span>
+                  </>
+                ) : (
+                  badge(a.state)
+                )}
                 {a.pinned && <span className="rounded bg-purple-900/60 px-1.5 text-xs text-purple-300">pinned</span>}
                 {a.draining && <span className="rounded bg-amber-900/60 px-1.5 text-xs text-amber-300">draining</span>}
                 {!a.enabled && <span className="rounded bg-zinc-800 px-1.5 text-xs text-zinc-500">disabled</span>}
               </div>
               <div className="mt-1 text-xs text-zinc-500">
-                {a.gpu_memory_used_mb.toFixed(0)} MB VRAM · {a.active_requests} active · {a.queued_requests} queued
+                {a.gpu_utilization_pct.toFixed(0)}% GPU · {a.gpu_memory_used_mb.toFixed(0)} MB VRAM · {a.active_requests} active · {a.queued_requests} queued
                 {a.consecutive_load_failures > 0 && (
                   <span className="text-red-400"> · {a.consecutive_load_failures} load failures</span>
                 )}

@@ -71,8 +71,16 @@ class AppState:
         self.transition = None
 
 
-def combined_ui_state(state: AppState) -> str:
-    """Simplified projection for the UI (spec 04 §3)."""
+def combined_ui_state(state: AppState, active: bool = False) -> str:
+    """Simplified projection for the UI (spec 04 §3): one of ``STOPPED``,
+    ``IDLE``, ``IDLE & LOADED``, ``RUNNING`` (plus the transient states).
+
+    ``active`` (spec 04 §3) is serving a request OR using the GPU — it drives
+    the ``RUNNING`` state. LOADED is based on VRAM (residency); RUNNING is based
+    on GPU utilization (``active``); STARTED (up, model not loaded) shows as
+    ``IDLE``. Apps without load/unload keep residency OFF, so they show only
+    ``STOPPED`` / ``IDLE`` / ``RUNNING``.
+    """
     p, r = state.process, state.residency
     if p is ProcessState.ERROR:
         return "ERROR"
@@ -81,15 +89,15 @@ def combined_ui_state(state: AppState) -> str:
     if p is ProcessState.STARTING:
         return "STARTING"
     if p is ProcessState.STOPPED:
-        return "OFF"
+        return "STOPPED"
     if r is ResidencyState.LOADING:
         return "LOADING"
     if r is ResidencyState.UNLOADING:
         return "UNLOADING"
+    if r is ResidencyState.LOADED and state.draining:
+        return "DRAINING"
+    if active:
+        return "RUNNING"
     if r is ResidencyState.LOADED:
-        if state.draining:
-            return "DRAINING"
-        if state.active_requests > 0:
-            return "PROCESSING"
-        return "IDLE"
-    return "OFF"
+        return "IDLE & LOADED"
+    return "IDLE"
