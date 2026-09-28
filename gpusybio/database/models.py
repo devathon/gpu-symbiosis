@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -249,4 +250,30 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[str] = mapped_column(Text)  # JSON scalar
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AppMetricLifetime(Base):
+    """Persisted lifetime metrics per application (spec 08 §5.1).
+
+    Survives restarts: the type's lifetime fields (whatever its tailer's
+    state() returns, keyed by the type's registered metric ids — e.g. llama's
+    token totals, times, draft/cache counters) as a JSON document, plus the
+    tailer's mechanism state (log byte-offset + a session fingerprint, first
+    64 bytes of the log). Written on a 60 s timer for active apps and on app
+    stop; seeded on server start so the tailer resumes *after* the stored
+    offset (no double-count) and keeps the lifetime across a log truncation
+    (app restart).
+
+    The fields are application-specific and type-registered (spec 04 §8), so
+    they are NOT columns: adding/renaming a type's fields never requires a
+    schema change.
+    """
+
+    __tablename__ = "app_metric_lifetime"
+
+    application_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    lifetime: Mapped[str] = mapped_column(Text, default="{}")
+    log_offset: Mapped[int] = mapped_column(Integer, default=0)
+    log_fingerprint: Mapped[bytes | None] = mapped_column(LargeBinary)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

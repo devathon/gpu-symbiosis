@@ -373,6 +373,13 @@ def make_admin_api(
         with db() as s:
             return [_app_view(a, states.get(a.id), resources) for a in s.query(Application)]
 
+    @api.get("/api/application-types")
+    def list_application_types():
+        """Registered application types (spec 04 §8): built-ins + drop-in
+        modules under <data_path>/plugins. The app form pre-fills its options
+        from this list."""
+        return {"types": metrics.type_registry.known()}
+
     @api.get("/api/applications/{app_id}")
     def get_application(app_id: str):
         with db() as s:

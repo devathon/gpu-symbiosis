@@ -62,10 +62,23 @@ export default function AppForm({
   act: (fn: () => Promise<void>) => void;
 }) {
   const [f, setF] = useState<AppFormFields>(editing ? fromView(editing) : EMPTY);
+  // Registered application types (spec 04 §8): built-ins + drop-in plugins.
+  const [types, setTypes] = useState<string[]>(["custom", "llama"]);
 
   useEffect(() => {
     setF(editing ? fromView(editing) : EMPTY);
   }, [editing]);
+
+  useEffect(() => {
+    api.appTypes().then((r) => {
+      const list = r.types.length ? r.types : [];
+      setTypes((p) => {
+        const next = new Set(p);
+        list.forEach((t) => next.add(t));
+        return [...next];
+      });
+    }).catch(() => {});
+  }, []);
 
   const set = <K extends keyof AppFormFields>(k: K, v: AppFormFields[K]) =>
     setF((p) => ({ ...p, [k]: v }));
@@ -130,10 +143,12 @@ export default function AppForm({
           </Row>
           <Row label="Application type">
             <select className={inp} value={f.application_type} onChange={(e) => set("application_type", e.target.value)}>
-              <option value="custom">custom</option>
-              <option value="llama">llama</option>
-              <option value="vllm">vllm</option>
-              <option value="openai">openai</option>
+              {!types.includes(f.application_type) && f.application_type !== "" && (
+                <option value={f.application_type}>{f.application_type}</option>
+              )}
+              {types.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
             </select>
           </Row>
         </Fieldset>

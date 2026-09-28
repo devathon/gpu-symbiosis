@@ -8,17 +8,11 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field
 
-AppType = Literal[
-    "llama",
-    "ollama",
-    "harness",
-    "comfyui",
-    "tts",
-    "image_generation",
-    "video_generation",
-    "embedding",
-    "custom",
-]
+# Free-form (spec 04 §8): the type is resolved through the pluggable type
+# registry — built-ins (llama, ollama, comfyui, tts), drop-in modules under
+# <data_path>/plugins, "custom" (config-declared metrics), or the generic
+# fallback for anything else.
+AppType = str
 
 WaitPolicy = Literal["REJECT", "EXPIRE", "ESCALATE_PRIORITY", "PROCESS_ANYWAY"]
 

@@ -90,18 +90,24 @@ For `llama` applications:
 ```text
 input tokens
 output tokens
-total tokens
 
-tokens/sec
-prompt tokens/sec
-generation tokens/sec
+cache hit %         (% of requests served from the KV cache — LCP slot selection)
+prompt t/s          (Σ prompt tokens / Σ prompt time — throughput-weighted)
+generation t/s      (Σ eval tokens / Σ eval time — throughput-weighted)
 
-average generation speed
-maximum generation speed
+draft acceptance    (Σ accepted / Σ generated, speculative decoding)
 
-requests
-completed requests
+total requests
+failed requests
+active requests     (active + queued; "1 + 4 queued" when queued)
 ```
+
+Values are rendered as bare numbers (no unit suffix) with `k`/`m`/`b` suffixes
+(`k` = 1e3, `m` = 1e6, `b` = 1e9; under 1e3 shown as-is). The latency
+percentiles are condensed into a single `Wait (P50/95/99)` / `Service (P50/95/99)`
+element. **Total tokens** and the overall **tokens t/s** are dropped from the
+card (not useful — the per-phase `prompt t/s` / `generation t/s` already convey
+throughput); both are still computed and exposed in `raw`.
 
 **Source.** A real `llama-server` exposes no cumulative token totals over HTTP
 (`/metrics` is per-request Prometheus gauges, `/state` is model state only), but
@@ -114,15 +120,41 @@ tails it, parsing the per-request lines (`llama_perf_context_print`):
 prompt eval time = 1234.56 ms / 100 tokens ( 12.35 ms per token, 81.00 tokens per second)
        eval time = 5678.90 ms / 200 runs   ( 28.39 ms per token, 35.22 tokens per second)
       total time = 6913.46 ms / 300 tokens
+draft acceptance = 0.40944 (  642 accepted /  1568 generated), mean len =  3.87
+selected slot by LCP similarity, f_sim_best = 0.996 (> 0.100 thold), f_keep = 0.997
 ```
 
-The prompt line's count is the input tokens, the eval line's count (runs) the
-output tokens, and each line's `tokens per second` the prompt/generation speed;
-the total line gives the overall throughput. The tailer tracks a read offset
-(rotation-safe) and accumulates lifetime totals; `reset()` starts a fresh
-lifetime on app start. Apps that do expose a `/stats` endpoint (e.g. the mock)
-still work: the first non-zero source wins (log, then `/stats`, then the
-request-tracked sums). The gateway also records per-request token counts from
+**Draft acceptance** is the speculative-decoding ratio (Σ accepted / Σ
+generated). **Cache hit** is the fraction of requests whose slot was selected by
+LCP (prefix) similarity — i.e. the prompt was largely served from the KV cache —
+over all slot selections (an LRU selection is a miss).
+
+**Persistence (§5.1).** The tailer's lifetime totals survive restarts: they are
+persisted in the `app_metric_lifetime` table together with the log byte-offset
+and a session fingerprint (the log's first 64 bytes). On server start the tailer
+is seeded from this state and resumes *after* the stored offset (no double-count).
+The log is truncated on every app start (`>log 2>&1`), so a changed fingerprint
+means a fresh session: the lifetime is **kept** and the new content is read from
+the start. The state is written on a 60 s timer for active (running) apps and
+again on app stop.
+
+The persisted fields are the type's *registered* fields (§9) — application-specific
+and type-dynamic (spec 04 §8), so they are stored as a **JSON document**
+(`lifetime` column), NOT as columns: adding, removing, or renaming a type's
+fields never requires a schema change, and a type's tailer persists whatever its
+`state()` returns. Only the tailer's *mechanism* state (log offset + session
+fingerprint) lives in its own columns. A corrupt document is treated as empty
+(fresh lifetime, logged). There are no automatic migrations.
+
+The prompt line's count is the input tokens and its `ms` the prompt phase time;
+the eval line's count (runs) is the output tokens and its `ms` the eval phase
+time. The rates are throughput-weighted (Σ tokens ÷ Σ time) so a large prompt
+weighs by its work, not as one vote per request — the same semantics as the
+overall `tokens t/s`. The total line gives the overall throughput. The tailer
+tracks a read offset
+(rotation-safe) and accumulates lifetime totals, which persist across restarts
+(§5.1). Apps that do expose a `/stats` endpoint (e.g. the mock) still work: the
+first non-zero source wins (log, then `/stats`, then the request-tracked sums). The gateway also records per-request token counts from
 the upstream response headers (`X-Input-Tokens` / `X-Output-Tokens`, §9.2).
 
 Optionally:
@@ -208,18 +240,25 @@ and [13](13-observability.md)).
 ## 9. Type Metrics Contract (Extensible Application Types)
 
 Application types are extensible without changing the scheduler, the recording
-pipeline, or the UI. A type is a registered **TypeSpec**; everything downstream
-consumes the spec's *declarative metric definition*, never the collection logic.
+pipeline, or the UI. A type is a registered **TypePlugin** — spec *plus* the
+handler that collects it; everything downstream consumes the spec's *declarative
+metric definition*, never the collection logic.
 
-### 9.1 TypeSpec Registry
+### 9.1 Type Registry
+
+```text
+TypePlugin
+──────────────────────
+type                 type name
+spec                 TypeSpec          ← what to record and display
+handler              TypeHandler class ← how to fetch (unified factory signature)
+```
 
 ```text
 TypeSpec
 ──────────────────────
-type                 type name (spec 03 §4 enumeration)
+type                 type name
 metrics              list[MetricDef]     ← what to record and display
-handler              TypeHandler | None  ← how to fetch (optional)
-defaults             type-default settings (scripts, readiness probe)
 should_schedule()    (method, path) -> bool  ← routing (spec 05 §6)
 ```
 
@@ -229,11 +268,18 @@ scheduler vs pass through directly (spec 05 §6). `comfyui` overrides it: only
 blindly. The app view also exposes `gpu_utilization_pct` alongside
 `gpu_memory_used_mb` (spec 04 §3 — RUNNING is based on GPU utilization).
 
-Built-in specs: `llama`, `ollama`, `comfyui`, `tts`, plus `generic` (fallback —
-always present). The `custom` type carries a user-declared spec from config
-(§9.6) instead of a built-in one. Every application also works through the
-generic spec: a missing or failing handler degrades to generic metrics, it never
-fails the application (see [04 §8.1](04-application-manager.md#81-generic-handler)).
+The registry holds no type-specific code: it resolves type → (spec, handler
+factory) from whatever registered itself. The shipped types (`llama`,
+`ollama`, `comfyui`, `tts`) are modules under `gpusybio/application_types/`
+that load with the same contract as drop-ins (§9.6); the **generic** fallback
+is registered first by core (always available, can't be shadowed). Any
+unknown type falls back to it. The `custom` type carries a user-declared spec
+from config (§9.6). A missing or failing handler degrades to generic
+metrics; it never fails the application (see
+[04 §8.1](04-application-manager.md#81-generic-handler)).
+
+A type's own lifetime fields persist as a JSON document (§5.1) — the type's
+fields are dynamic by design, the schema is not.
 
 ### 9.2 MetricDef (the declarative contract)
 
@@ -246,6 +292,7 @@ unit          "tokens", "tokens/sec", "%", "ms", "req", ...
 kind          gauge | counter | rate
 source        handler | proxy | derived
 display       card | chart            (UI hint)
+group         display group           (UI section, default "metrics")
 ```
 
 - `source=handler`  — value comes from `TypeHandler.collect()` (§9.3).
@@ -255,8 +302,10 @@ display       card | chart            (UI hint)
   (EWMA rates, percentiles, tokens/sec, §2–3).
 
 The UI renders one panel per application, auto-generated from the `metrics`
-list: `card` metrics as stat tiles, `chart` metrics as time series. **Adding a
-type never requires UI code** — the panel appears from the definition alone.
+list: `card` metrics as stat tiles, `chart` metrics as time series. The card
+renders its fields **grouped by `group`, in first-appearance order** — the
+type's fields dictate the card layout (spec 04 §8). **Adding a type never
+requires UI code** — the panel appears from the definition alone.
 
 ### 9.3 TypeHandler (collection logic)
 
@@ -307,22 +356,37 @@ spec for that application).
 ### 9.5 Reporting
 
 ```text
-GET /api/applications/{id}/metrics?window=10m
+GET /api/applications/{id}/metrics
 → {
-    "definition": [ MetricDef... ],
-    "series":     { metric_id: [ { "at": ..., "value": ... } ] },
-    "latest":     { metric_id: { "value": ..., "stale": bool } }
+    "type":      type name,
+    "spec":      [ MetricDef... ],   ← what this type records (incl. group)
+    "metrics":   [ { id, name, unit, kind, display, group, value } ],
+                 ← the card view: one entry per field, in spec order
+    "state":     { residency_state, process_state, active_requests, ... },
+    "raw":       { metric_id: value },
+    "active_time": { ... }
   }
 ```
 
-Series come from rolling history for short windows and from aggregates
-(§6) for longer ones. The same values feed the scheduler's EWMA inputs
-(§2–3) and the event log (§8) — one pipeline, three consumers.
+The `metrics` list **is** the card: the UI renders it directly, grouped by
+`group` in first-appearance order (spec 04 §8), so a type's fields dictate the
+card layout without UI code. Requests dedupe lives in this view: a type's own
+`requests` field (log-derived) wins over the gateway-tracked
+`requests_received`, which then never appears twice.
+
+Time series for charts come from the metrics-samples endpoints (rolling
+history for short windows, aggregates (§6) for longer ones). The same values
+feed the scheduler's EWMA inputs (§2–3) and the event log (§8) — one
+pipeline, three consumers.
 
 ### 9.6 Extensibility
 
-- **Built-in types** — definition + small handler, registered in code
-  (llama, ollama, comfyui, tts per [04 §8](04-application-manager.md#8-type-handler-plugins)).
+- **Shipped type modules** — one module per type under
+  `gpusybio/application_types/` (llama, ollama, comfyui, tts per
+  [04 §8](04-application-manager.md#8-type-handler-plugins)), each holding all
+  of its own code (spec + handler + tailer) and registering itself with the
+  same contract as a drop-in; loaded first, so they win name collisions. The
+  registry itself holds no type-specific code.
 - **`custom` type** — the application's config declares its metrics:
 
   ```yaml
@@ -334,8 +398,22 @@ Series come from rolling history for short windows and from aggregates
   ```
 
   The generic handler interprets the `collect` mappings — no code required.
-- **Pluggable handler** — config may point at a module providing a TypeHandler
-  (subject to the script/handler sandboxing rules of [12](12-security.md)).
+- **Drop-in plugins** — a `.py` module in `<data_path>/plugins/` registers a
+  type at server start, no config change, no restart of the process model
+  (subject to the script/handler sandboxing rules of [12](12-security.md)):
+
+  ```python
+  # <data_path>/plugins/widgets.py
+  def register(registry):
+      registry.register(TypePlugin("widgets", TypeSpec("widgets", [...]), WidgetsHandler))
+  # — or expose PLUGIN = TypePlugin(...) instead of register().
+  ```
+
+  First-registered names win collisions — the generic fallback (registered
+  first by core) and the shipped type modules (loaded before drop-ins) cannot
+  be shadowed; a failing module is skipped with a logged error and never stops
+  startup. The UI's type list comes from `GET /api/application-types`, so a
+  new type appears in the app form automatically.
 
 ## 10. Memory & Timing Learning Hooks
 

@@ -1,15 +1,16 @@
 """Type metrics contract (spec 08 §9): what is recorded/displayed is declared by
 a TypeSpec; how it is fetched is the TypeHandler's job.
 
-MetricDef is a pure dataclass — the UI auto-renders from it. Built-in specs
-(llama, ollama, comfyui, tts) are registered; ``custom`` reads its metric list
-from the application's config; ``generic`` is the fallback.
+MetricDef is a pure dataclass — the UI auto-renders from it. Application types
+(llama, ollama, comfyui, tts) each live in their own module under
+``gpusybio/application_types/`` (spec 04 §8); this module holds only the
+type-agnostic contract: ``custom`` reads its metric list from the application's
+config and ``generic`` is the fallback every application works with.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar
 
 
 @dataclass
@@ -20,6 +21,7 @@ class MetricDef:
     unit: str = ""
     source: str = "sample"  # sample | handler | config | computed
     display: str = "card"  # card | chart | table | text
+    group: str = "metrics"  # card section the UI renders the field under
     collect: dict = field(default_factory=dict)  # handler fetch mapping
     aggregation: str = "avg"  # avg | sum | max | min | last | percentile_95
 
@@ -42,120 +44,31 @@ class TypeSpec:
         return True
 
 
-# -- built-in specs (spec 08 §5/§9) -------------------------------------------
+# -- type-agnostic spec (spec 04 §8.1) ------------------------------------------
 
-LLAMA_SPEC = TypeSpec("llama", [
-    MetricDef("total_tokens", "Total tokens", "counter", "tok", "handler", "card"),
-    MetricDef("input_tokens", "Input tokens", "counter", "tok", "handler", "card"),
-    MetricDef("output_tokens", "Output tokens", "counter", "tok", "handler", "card"),
-    MetricDef("tokens_per_sec", "Tokens / sec", "rate", "tok/s", "handler", "card",
-              aggregation="avg"),
-    MetricDef("prompt_tokens_per_sec", "Prompt tok / sec", "rate", "tok/s", "handler", "card",
-              aggregation="avg"),
-    MetricDef("generation_tokens_per_sec", "Generation tok / sec", "rate", "tok/s", "handler", "card",
-              aggregation="avg"),
-    MetricDef("requests", "Requests", "counter", "req", "handler", "card",
-              aggregation="sum"),
-    MetricDef("completed_requests", "Completed", "counter", "req", "handler", "card",
-              aggregation="sum"),
-])
-
-OLLAMA_SPEC = TypeSpec("ollama", [
-    MetricDef("requests", "Requests", "counter", "req", "handler", "card",
-              aggregation="sum"),
-    MetricDef("completed_requests", "Completed", "counter", "req", "handler", "card",
-              aggregation="sum"),
-    MetricDef("total_tokens", "Total tokens", "counter", "tok", "handler", "card"),
-    MetricDef("tokens_per_sec", "Tokens / sec", "rate", "tok/s", "handler", "card",
-              aggregation="avg"),
-])
-
-class ComfyUISpec(TypeSpec):
-    """ComfyUI (spec 05 §6): only the prompt-submission endpoint goes through
-    the scheduler; reads / static / websocket pass through directly. The set is
-    a class attribute so it can be extended without subclassing again."""
-
-    scheduled_endpoints: ClassVar[set[tuple[str, str]]] = {("POST", "/api/prompt")}
-
-    def should_schedule(self, method: str, path: str) -> bool:
-        return (method.upper(), path) in self.scheduled_endpoints
-
-
-COMFYUI_SPEC = ComfyUISpec("comfyui", [
-    MetricDef("queue_depth", "Queue depth", "gauge", "req", "handler", "card"),
-    MetricDef("progress", "Progress", "gauge", "%", "handler", "card"),
-    MetricDef("is_active", "Active", "text", "", "handler", "card"),
-    MetricDef("idle_sec", "Idle (sec)", "gauge", "s", "sample", "card"),
-])
-
-TTS_SPEC = TypeSpec("tts", [
-    MetricDef("requests", "Requests", "counter", "req", "handler", "card",
-              aggregation="sum"),
-    MetricDef("completed_requests", "Completed", "counter", "req", "handler", "card",
-              aggregation="sum"),
-    MetricDef("avg_latency_sec", "Avg latency", "gauge", "s", "handler", "card",
-              aggregation="avg"),
-])
-
-# Fallback every application works with (spec 04 §8.1).
+# Fallback every application works with (spec 04 §8.1). GPU memory/utilisation are
+# shown in the applications list (not the metrics card). Application types live
+# in gpusybio/application_types/<type>.py (spec 04 §8).
 GENERIC_SPEC = TypeSpec("generic", [
-    MetricDef("gpu_memory_mb", "GPU memory", "gauge", "MB", "sample", "card"),
-    MetricDef("gpu_utilization_pct", "GPU utilisation", "gauge", "%", "sample", "card"),
-    MetricDef("active_requests", "Active requests", "gauge", "req", "sample", "card"),
-    MetricDef("queued_requests", "Queued requests", "gauge", "req", "sample", "card"),
+    MetricDef("requests_received", "Total Requests", "counter", "", "computed", "card",
+              "requests", aggregation="sum"),
 ])
 
-# Common application metrics (spec 08 §4) — appended to every spec's view.
+# Common application metrics (spec 08 §4) — appended to every spec's view. Values
+# are rendered as bare numbers; the UI condenses the latency percentiles into
+# "Wait (P50/95/99)" / "Service (P50/95/99)" and combines active + queued into
+# "Active Requests".
 COMMON_METRICS = [
-    MetricDef("active_requests", "Active requests", "gauge", "req", "sample", "card"),
-    MetricDef("queued_requests", "Queued requests", "gauge", "req", "sample", "card"),
-    MetricDef("requests_total", "Total requests", "counter", "req", "computed", "card",
-              aggregation="sum"),
-    MetricDef("requests_completed", "Successful", "counter", "req", "computed", "card",
-              aggregation="sum"),
-    MetricDef("requests_failed", "Failed", "counter", "req", "computed", "card",
-              aggregation="sum"),
-    MetricDef("avg_latency_sec", "Avg service", "gauge", "s", "computed", "card",
+    MetricDef("requests_failed", "Failed Requests", "counter", "", "computed", "card",
+              "requests", aggregation="sum"),
+    MetricDef("p50_wait_sec", "P50 wait", "histogram", "", "computed", "card", "latency"),
+    MetricDef("p95_wait_sec", "P95 wait", "histogram", "", "computed", "card", "latency"),
+    MetricDef("p99_wait_sec", "P99 wait", "histogram", "", "computed", "card", "latency"),
+    MetricDef("p50_service_sec", "P50 service", "histogram", "", "computed", "card", "latency"),
+    MetricDef("p95_service_sec", "P95 service", "histogram", "", "computed", "card", "latency"),
+    MetricDef("p99_service_sec", "P99 service", "histogram", "", "computed", "card", "latency"),
+    MetricDef("avg_wait_sec", "Avg wait", "gauge", "", "computed", "card", "latency",
               aggregation="avg"),
-    MetricDef("p50_wait_sec", "P50 wait", "histogram", "s", "computed", "card"),
-    MetricDef("p95_wait_sec", "P95 wait", "histogram", "s", "computed", "card"),
-    MetricDef("p99_wait_sec", "P99 wait", "histogram", "s", "computed", "card"),
-    MetricDef("p50_service_sec", "P50 service", "histogram", "s", "computed", "card"),
-    MetricDef("p95_service_sec", "P95 service", "histogram", "s", "computed", "card"),
-    MetricDef("p99_service_sec", "P99 service", "histogram", "s", "computed", "card"),
-    MetricDef("avg_wait_sec", "Avg wait", "gauge", "s", "computed", "card", aggregation="avg"),
-    MetricDef("avg_service_sec", "Avg service", "gauge", "s", "computed", "card",
+    MetricDef("avg_service_sec", "Avg service", "gauge", "", "computed", "card", "latency",
               aggregation="avg"),
 ]
-
-BUILTIN_SPECS: dict[str, TypeSpec] = {
-    "llama": LLAMA_SPEC,
-    "ollama": OLLAMA_SPEC,
-    "comfyui": COMFYUI_SPEC,
-    "tts": TTS_SPEC,
-    "generic": GENERIC_SPEC,
-}
-
-
-class TypeRegistry:
-    """type → TypeSpec. ``custom`` resolves from the app config's metrics list."""
-
-    def __init__(self) -> None:
-        self._specs = dict(BUILTIN_SPECS)
-        self._custom: dict[str, TypeSpec] = {}
-
-    def spec_for(self, app_type: str, custom_metrics: list[dict] | None = None) -> TypeSpec:
-        if app_type == "custom":
-            if custom_metrics:
-                spec = TypeSpec(
-                    "custom",
-                    [MetricDef(**{k: m.get(k, {}) for k in (
-                        "id", "name", "kind", "unit", "source", "display", "collect",
-                        "aggregation") if m.get(k) is not None}) for m in custom_metrics],
-                )
-                return spec
-            return self._specs["generic"]
-        return self._specs.get(app_type, self._specs["generic"])
-
-    def register(self, spec: TypeSpec) -> None:
-        self._specs[spec.type] = spec

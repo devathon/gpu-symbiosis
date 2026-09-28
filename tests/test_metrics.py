@@ -16,9 +16,10 @@ from gpusybio.database.db import create_engine, init_db, make_session_factory
 from gpusybio.database.models import MetricSample, Application, Gateway
 from gpusybio.events.bus import EventBus
 from gpusybio.metrics.aggregate import MetricsAggregator
-from gpusybio.metrics.handlers import LlamaHandler, make_handler
+from gpusybio.metrics.type_registry import make_type_registry
+from gpusybio.application_types.llama import LlamaHandler
 from gpusybio.metrics.requests import RequestMetrics
-from gpusybio.metrics.typespec import COMMON_METRICS, LLAMA_SPEC, TypeRegistry
+from gpusybio.metrics.typespec import COMMON_METRICS
 
 
 # -- unit: request metrics (spec 08 §2/§4) ------------------------------------
@@ -93,28 +94,71 @@ def test_request_metrics_db_lookup():
     assert snap["average_service_sec"] == 2.0
 
 
+# -- unit: raw-view merge (spec 08 §4) -------------------------------------------
+def test_merge_metrics_log_derived_wins_over_zeroed_bucket():
+    """The bucket snapshot always carries input/output/total_tokens (zero on a
+    fresh process); it must not stomp the tailer's lifetime totals."""
+    from gpusybio.metrics import _merge_metrics
+    type_metrics = {"input_tokens": 3600329, "output_tokens": 378120,
+                    "total_tokens": 3978449, "requests": 207,
+                    "draft_acceptance": 43.8}
+    request = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+               "requests_received": 4, "requests_failed": 0, "p50_wait_sec": 2.5,
+               "active_requests": 0, "queued_requests": 0}
+    out = _merge_metrics({}, type_metrics, request, {})
+    assert out["input_tokens"] == 3600329  # not stomped by the bucket's 0
+    assert out["output_tokens"] == 378120
+    assert out["total_tokens"] == 3978449
+    assert out["requests"] == 207
+    assert out["draft_acceptance"] == 43.8
+    # request-unique keys still fill in (including zero-valued counters)
+    assert out["requests_received"] == 4
+    assert out["requests_failed"] == 0
+    assert out["p50_wait_sec"] == 2.5
+
+
+def test_merge_metrics_request_fills_empty_tailer():
+    """With an empty tailer (all zeros) the request-tracked tokens fill in."""
+    from gpusybio.metrics import _merge_metrics
+    type_metrics = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    request = {"input_tokens": 16, "output_tokens": 32, "total_tokens": 48,
+               "requests_completed": 1}
+    out = _merge_metrics({}, type_metrics, request, {})
+    assert out["input_tokens"] == 16
+    assert out["output_tokens"] == 32
+    assert out["total_tokens"] == 48
+    assert out["requests_completed"] == 1
+
+
 # -- unit: type contract (spec 08 §9) -------------------------------------------
 def test_type_registry_builtin_and_custom():
-    reg = TypeRegistry()
+    import types
+
+    reg = make_type_registry()
     assert reg.spec_for("llama").type == "llama"
-    assert "total_tokens" in [m.id for m in reg.spec_for("llama").metrics]
+    assert "input_tokens" in [m.id for m in reg.spec_for("llama").metrics]
+    assert "total_tokens" not in [m.id for m in reg.spec_for("llama").metrics]  # dropped
     # unknown type falls back to generic
     assert reg.spec_for("nonsense").type == "generic"
-    # custom reads its metric list
-    custom = [
+    # custom reads its metric list from the app config (description JSON)
+    import json
+
+    row = types.SimpleNamespace(description=json.dumps({"metrics": [
         {"id": "queue_depth", "name": "Queue depth", "unit": "req", "kind": "gauge",
-         "source": "handler", "display": "card", "collect": {"url": "/stats", "json_path": "queue.depth"}}
-    ]
-    spec = reg.spec_for("custom", custom)
+         "source": "handler", "display": "card",
+         "collect": {"url": "/stats", "json_path": "queue.depth"}}
+    ]}))
+    spec = reg.spec_for("custom", row)
     assert spec.type == "custom"
     assert spec.metric("queue_depth").collect["url"] == "/stats"
     # custom with no metrics falls back to generic
-    assert reg.spec_for("custom", None).type == "generic"
+    assert reg.spec_for("custom", types.SimpleNamespace(description=None)).type == "generic"
 
 
 def test_should_schedule_routing():
     """spec 05 §6: the application type declares which requests are scheduled."""
-    from gpusybio.metrics.typespec import COMFYUI_SPEC, TypeSpec
+    from gpusybio.metrics.typespec import TypeSpec
+    from gpusybio.application_types.comfyui import COMFYUI_SPEC
     # comfyui: only the prompt-submission endpoint is scheduled
     assert COMFYUI_SPEC.should_schedule("POST", "/api/prompt") is True
     assert COMFYUI_SPEC.should_schedule("GET", "/api/system_stats") is False
@@ -128,9 +172,11 @@ def test_common_metrics_present():
     ids = [m.id for m in COMMON_METRICS]
     assert "p95_wait_sec" in ids
     assert "p99_service_sec" in ids
-    assert "active_requests" in ids
-    assert "requests_total" in ids
+    assert "requests_failed" in ids
     assert "avg_wait_sec" in ids
+    # reduced request blocks: active/queued are shown combined as "Active" in the UI
+    assert "active_requests" not in ids
+    assert "requests_total" not in ids
 
 
 # -- unit: llama handler (spec 08 §5) ------------------------------------------
@@ -272,7 +318,8 @@ async def test_metrics_api(server):
     assert m["application_id"] == "a1"
     assert "metrics" in m and m["metrics"]
     ids = [x["id"] for x in m["metrics"]]
-    assert "active_requests" in ids  # common metric
+    assert "requests_failed" in ids  # common metric
+    assert "active_requests" in m["state"]  # combined into "Active" in the UI
     assert "total_tokens" in m["raw"] or "gpu_memory_mb" in m["raw"]
     # request metrics endpoint
     r = await c.get(f"http://127.0.0.1:{ADMIN_PORT}/api/metrics/request")
@@ -294,7 +341,37 @@ async def test_metrics_llama_type(server):
     m = r.json()
     assert m["type"] == "llama"
     spec_ids = [x["id"] for x in m["spec"]]
-    assert "total_tokens" in spec_ids
+    assert "input_tokens" in spec_ids
+    assert "draft_acceptance" in spec_ids
+    assert "cache_hit_pct" in spec_ids
+    # the reduced request blocks: total_tokens and completed_requests are dropped
+    assert "total_tokens" not in spec_ids
+    assert "completed_requests" not in spec_ids
+    await c.aclose()
+
+
+async def test_metrics_endpoint_token_totals_not_stomped_by_bucket(server):
+    """The endpoint's raw token totals come from the log tailer (lifetime), not
+    the request bucket's zeroed counts (spec 08 §4/§5.1). A fresh process's
+    bucket has input/output/total_tokens=0; it must not override the tailer."""
+    log = f"/tmp/gpusybio-e2e-data-{os.getpid()}/logs/a1.log"
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    with open(log, "a") as f:
+        f.write(
+            "I slot print_timing: id 0 | task 1 | prompt eval time =   1234.56 ms /   100 tokens "
+            "(   12.35 ms per token,   81.00 tokens per second)\n"
+            "I slot print_timing: id 0 | task 1 |       total time =   2345.67 ms /   150 tokens\n"
+        )
+    await asyncio.sleep(2.5)  # let the 1 s metrics loop consume the log lines
+    c = httpx.AsyncClient()
+    r = await c.get(f"http://127.0.0.1:{ADMIN_PORT}/api/applications/a1/metrics")
+    assert r.status_code == 200
+    raw = r.json()["raw"]
+    assert raw["input_tokens"] == 100  # tailer value, not the bucket's 0
+    assert raw["total_tokens"] == 150
+    # throughput-weighted: 100 tokens / 1234.56 ms (the line's rounded "81.00"
+    # is not what's used)
+    assert raw["prompt_tokens_per_sec"] == pytest.approx(81.0, abs=0.01)
     await c.aclose()
 
 

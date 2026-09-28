@@ -272,32 +272,61 @@ A process death is a hard event: it wakes the scheduler immediately.
 
 ## 8. Type Handler Plugins
 
-The application type is extensible via a **TypeSpec** — a registered metric
-definition plus an optional handler (see the contract in
+The application type is extensible via a **TypePlugin** — a registered metric
+spec *plus* the handler that collects it (see the contract in
 [08 §9](08-metrics-module.md#9-type-metrics-contract-extensible-application-types):
 what is recorded and displayed is declared by the spec; *how* it is fetched is
-the handler's job). The handler implements the `ApplicationTypeHandler` interface:
+the handler's job). A plugin is registered by name; first-registered names win
+collisions. The registry holds no type-specific code — each type is a module
+that registers itself (below).
 
 ```text
-ApplicationTypeHandler
+TypePlugin
 ──────────────────────
-detect_ready()
-collect_metrics()
-detect_activity()
-get_request_metrics()
-prepare_load()
-prepare_unload()
+type                 type name
+spec                 TypeSpec          ← fields to record/display (incl. group)
+handler              TypeHandler class ← collection logic
 ```
 
-Built-in handlers:
+Handler factory signature (unified — every handler, shipped type and drop-in):
 
 ```text
-LlamaHandler        token metrics, prompt/generation speed, request metrics
-OllamaHandler       library API metrics
-ComfyUIHandler      queue/progress API, GPU-activity interpretation
-TTSHandler          request metrics
-GenericHandler      fallback for everything
+(resources, states, request_metrics, base_urls, session=None, log_paths=None)
+    -> handler
 ```
+
+Handler interface: `collect_metrics(app_id)` is the only required method
+(called each 1 s tick while the app is RUNNING/LOADED). Optional:
+`get_request_metrics(app_id)` (per-request metrics from the gateway's request
+records), `detect_activity(app_id)`, and `tailer(app_id)` — a log tailer
+(any object with `read()` / `state()` / `seed()`; the tailer is
+**handler-owned** — the collector only ever calls `state()`/`seed()`, and the
+type's accumulation logic lives in the tailer's `read()`).
+
+Shipped application types — one module per type under
+`gpusybio/application_types/`, each holding all of its own code (spec +
+handler + tailer) and registering itself with the same contract as a drop-in:
+
+```text
+llama.py     LlamaHandler    token metrics (log tailer), request metrics
+ollama.py    LlamaHandler    (same handler — Ollama logs the same lines)
+comfyui.py   ComfyUIHandler  queue/progress API, GPU-activity interpretation
+tts.py       TTS spec + GenericHandler  request metrics
+```
+
+The type registry (`gpusybio/metrics/type_registry.py`) holds no
+type-specific code. Loading order (first-registered name wins): (1) the
+generic fallback (08 §9.1) — registered first so nothing can shadow it,
+(2) the shipped type modules, (3) drop-in plugins. Drop-in plugins: a `.py`
+module in `<data_path>/plugins/` exposing `register(registry)` or
+`PLUGIN = TypePlugin(...)` — loaded at server start, per-module exception
+isolation (a broken module never stops startup), no config change needed
+(08 §9.6).
+
+Unknown types fall back to the generic handler + spec; the `custom` type
+carries a user-declared spec from config (08 §9.6). The config no longer
+rejects unknown types (free-form string) and the UI's type list comes from
+`GET /api/application-types`.
 
 This keeps application-specific logic out of the scheduler.
 

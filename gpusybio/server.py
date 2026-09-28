@@ -17,6 +17,7 @@ import uvicorn
 from aiohttp import ClientSession
 
 from gpusybio.api import make_admin_api
+from gpusybio.metrics.type_registry import make_type_registry
 from gpusybio.applications.lifecycle import ProcessState
 from gpusybio.applications.manager import ApplicationManager
 from gpusybio.config.models import Config
@@ -58,6 +59,10 @@ class Server:
             memory_safety_margin=float(config.settings.gpu.memory_safety_margin),
         )
         self.data_path = config.effective_data_path()
+        # Pluggable application types (spec 04 §8): the shipped type modules +
+        # drop-in modules under <data_path>/plugins, loaded before any app
+        # config is resolved.
+        self.type_registry = make_type_registry(self.data_path)
         self.apps = ApplicationManager(
             self.states, self.resources, self.bus, self.db, config.settings, data_path=self.data_path
         )
@@ -102,6 +107,7 @@ class Server:
             app_types={a.id: a.application_type for a in app_rows},
             base_urls={a.id: f"http://127.0.0.1:{a.port}" for a in app_rows},
             log_paths={a.id: config.app_log_path(a.id) for a in app_rows},
+            type_registry=self.type_registry,
         )
         # Phase 4 (spec 06 §10): automatic idle detection + unloading.
         self.idle_unloader = IdleUnloader(
@@ -149,7 +155,7 @@ class Server:
         db = self.db
         # spec 05 §6: routing decision from the application type — which requests
         # go through the scheduler vs pass through directly.
-        spec = self.metrics.type_registry.spec_for(app_cfg.application_type)
+        spec = self.type_registry.spec_for(app_cfg.application_type)
         return make_gateway_proxy(
             gw, self.request_manager, self.session, self.states, app_view,
             verify_key=lambda presented: _verify_key(db, gw_id, presented),

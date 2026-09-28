@@ -198,6 +198,7 @@ export interface MetricItem {
   unit: string;
   kind: string;
   display: string;
+  group?: string;
   value: number | string | null;
 }
 
@@ -349,6 +350,7 @@ export async function logout(): Promise<void> {
 
 export const api = {
   status: () => getJson<Status>("/api/status"),
+  appTypes: () => getJson<{ types: string[] }>("/api/application-types"),
   appMetrics: (id: string, window = "1h") =>
     getJson<AppMetrics>(`/api/applications/${id}/metrics?window=${window}`),
   requestMetrics: () =>

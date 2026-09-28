@@ -1,9 +1,26 @@
-import { useEffect, useState } from "react";
-import { api, AppMetrics } from "../api";
+import { Fragment, useEffect, useState } from "react";
+import { api, AppMetrics, MetricItem } from "../api";
 import { badge } from "./badges";
 
-// Auto-rendered per-type metrics panel (spec 08 §9): the metric list comes from
-// the application's TypeSpec, so new types render without UI changes.
+// Per-application metrics card. Rendered from the type's spec view (spec 08
+// §9): groups in first-appearance order, one tile per field — the
+// application type dictates its own layout (spec 04 §8). Values are bare
+// numbers (no unit suffix) with k/m/b suffixes for large values; the latency
+// percentiles are condensed into "Wait (P50/95/99)" / "Service (P50/95/99)";
+// the requests group ends with the state-driven "Active" tile (active +
+// queued). GPU memory/utilisation live in the applications list above.
+
+// Latency fields condensed into the composite tiles (not rendered individually).
+const LATENCY_COMPOSITE = new Set([
+  "p50_wait_sec",
+  "p95_wait_sec",
+  "p99_wait_sec",
+  "p50_service_sec",
+  "p95_service_sec",
+  "p99_service_sec",
+  "avg_wait_sec",
+  "avg_service_sec",
+]);
 export default function MetricsPanel({ apps }: { apps: { id: string; name: string }[] }) {
   const [data, setData] = useState<Record<string, AppMetrics>>({});
   const [err, setErr] = useState<string | null>(null);
@@ -55,69 +72,102 @@ function AppMetricsCard({
   m?: AppMetrics;
 }) {
   if (!m) return null;
-  const byId = Object.fromEntries(m.metrics.map((x) => [x.id, x]));
-  const latency = [
-    byId["p50_latency_sec"] ?? byId["p50_wait_sec"],
-    byId["p95_latency_sec"] ?? byId["p95_wait_sec"],
-    byId["p99_latency_sec"] ?? byId["p99_wait_sec"],
-  ];
-  const tokens = byId["total_tokens"]?.value != null;
+  const raw = m.raw || {};
+  const state = m.state || {};
   const activeTime = m.active_time || {};
+
+  const active = state.active_requests ?? 0;
+  const queued = state.queued_requests ?? 0;
+
+  // Groups in first-appearance order of the type's spec view (spec 08 §9).
+  const groups: [string, MetricItem[]][] = [];
+  for (const item of m.metrics || []) {
+    const g = item.group || "metrics";
+    let slot = groups.find(([name]) => name === g);
+    if (!slot) {
+      slot = [g, []];
+      groups.push(slot);
+    }
+    slot[1].push(item);
+  }
 
   return (
     <div className="rounded border border-zinc-800 bg-zinc-950/40 p-3">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-sm font-medium text-zinc-200">{app.name}</span>
         <span className="flex items-center gap-1.5 text-xs">
-          {badge(m.state.residency_state)}
+          {badge(state.residency_state)}
           <span className="text-zinc-500">{m.type}</span>
         </span>
       </div>
       <div className="grid grid-cols-3 gap-2 text-xs">
-        {m.metrics
-          .filter((x) => x.value != null)
-          .map((x) => (
-            <div key={x.id} className="rounded bg-zinc-900/60 px-2 py-1.5">
-              <div className="text-zinc-500">{x.name}</div>
-              <div className="text-sm text-zinc-200">
-                {fmt(x.value)}
-                {x.unit ? <span className="ml-0.5 text-zinc-500">{x.unit}</span> : null}
-              </div>
-            </div>
-          ))}
+        {groups.map(([g, items]) => (
+          <Fragment key={g}>
+            {g === "latency" && raw.p50_wait_sec != null && (
+              <Metric
+                label="Wait (P50/95/99)"
+                value={`${fmt(raw.p50_wait_sec)} / ${fmt(raw.p95_wait_sec)} / ${fmt(raw.p99_wait_sec)}`}
+              />
+            )}
+            {g === "latency" && raw.p50_service_sec != null && (
+              <Metric
+                label="Service (P50/95/99)"
+                value={`${fmt(raw.p50_service_sec)} / ${fmt(raw.p95_service_sec)} / ${fmt(raw.p99_service_sec)}`}
+              />
+            )}
+            {items.filter((it) => !LATENCY_COMPOSITE.has(it.id)).map((it) => (
+              <Metric key={it.id} label={it.name} value={fmt(it.value)} />
+            ))}
+            {g === "requests" && (
+              <Metric
+                label="Active Requests"
+                value={queued > 0 ? `${active} + ${queued} queued` : `${active}`}
+              />
+            )}
+          </Fragment>
+        ))}
       </div>
-      {latency.some((x) => x?.value != null) && (
-        <div className="mt-2 flex gap-4 text-xs text-zinc-400">
-          <span>
-            Wait P50/P95/P99:{" "}
-            <span className="text-zinc-200">
-              {[latency[0], latency[1], latency[2]]
-                .map((x) => (x?.value != null ? `${(x.value as number).toFixed(2)}s` : "—"))
-                .join(" / ")}
-            </span>
-          </span>
-        </div>
-      )}
-      {tokens && <div className="mt-1 text-xs text-zinc-500">token metrics active</div>}
       {activeTime.total_active_time != null && activeTime.total_active_time > 0 && (
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
           <span>active {fmtDur(activeTime.total_active_time)}</span>
           <span>processing {fmtDur(activeTime.processing_time ?? 0)}</span>
-          <span>idle-loaded {fmtDur(activeTime.idle_loaded_time ?? 0)}</span>
+          <span>idle {fmtDur(activeTime.idle_loaded_time ?? 0)}</span>
         </div>
       )}
     </div>
   );
 }
 
-function fmt(v: number | string | null): string {
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded bg-zinc-900/60 px-2 py-1.5">
+      <div className="text-zinc-500">{label}</div>
+      <div className="text-sm text-zinc-200">{value}</div>
+    </div>
+  );
+}
+
+// Bare number, no unit suffix. Large values get a k (1e3) / m (1e6) / b (1e9)
+// suffix; values under 1000 are shown as-is (integers without decimals, others
+// with up to 2 significant decimals).
+function fmt(v: unknown): string {
   if (v == null) return "—";
-  if (typeof v === "number") return v >= 100 ? v.toFixed(0) : v.toFixed(1);
-  return v;
+  const n = typeof v === "number" ? v : Number(v);
+  if (Number.isNaN(n)) return String(v);
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return trimZeros((n / 1e9).toFixed(2)) + "b";
+  if (abs >= 1e6) return trimZeros((n / 1e6).toFixed(2)) + "m";
+  if (abs >= 1000) return trimZeros((n / 1000).toFixed(2)) + "k";
+  if (Number.isInteger(n)) return n.toString();
+  return trimZeros(n.toFixed(2));
+}
+
+function trimZeros(s: string): string {
+  return s.replace(/\.?0+$/, "");
 }
 
 function fmtDur(sec: number): string {
-  if (sec < 60) return `${sec.toFixed(0)}s`;
+  if (sec < 60) return `${Math.round(sec)}s`;
   const m = Math.floor(sec / 60);
   const s = Math.round(sec % 60);
   return `${m}m ${s}s`;
