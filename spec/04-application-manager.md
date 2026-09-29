@@ -106,10 +106,10 @@ projects them plus the `active` flag into the display states above.
 3. T0 = process start (execute start_script; its stdout/stderr go to the
    effective log path; the script is NEVER killed on timeout — an attached
    script becomes the app)
-4. Resolve PID: the pid file's contents if freshly written (mtime at/after
-   this start), else the PID of the spawned script (proc.pid) — see 03 §2.5.
-   If the script left the pid file blank and is still running (attached), the
-   system writes the resolved PID into it.
+4. Resolve PID: the pid file's contents only if *freshly* written (mtime
+   at/after this start); otherwise the PID of the spawned script (proc.pid).
+   For an attached script (still running), the system writes that PID into the
+   file — overwriting a stale value from a previous run — see 03 §2.5.
 5. If the start script exited non-zero: Process = ERROR, error = START_FAILED
    (detail from the log tail)
 6. Poll readiness (see §6) every 1 s

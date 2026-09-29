@@ -131,6 +131,34 @@ async def test_stale_pidfile_not_read(tmp_path):
     _kill(r.pid)
 
 
+async def test_attached_stale_pidfile_overwritten(tmp_path):
+    """Issue: an *attached* script (no pid-file write) starts while a pid file
+    left over from a *previous* run holds a stale PID (content + old mtime).
+    The code must NOT read that stale value — it resolves to the app's PID
+    (``proc.pid``) and writes it over the stale one (spec 03 §2.5)."""
+    import time as _time
+    log = str(tmp_path / "q.log")
+    pid = str(tmp_path / "q.pid")
+    # Pre-seed a stale pid file (from a previous run): content + old mtime.
+    with open(pid, "w") as f:
+        f.write("99999\n")
+    old = _time.time() - 120  # 2 minutes ago (well before this start)
+    os.utime(pid, (old, old))
+    # The attached script never writes the pid file.
+    r = await run_start_script(
+        "exec sleep 30",
+        app_id="q1", log_path=log, pid_path=pid, grace=2.0,
+    )
+    assert r.exit_code is None
+    assert _alive(r.pid)
+    # The resolved PID is the CURRENT run's app, not the stale 99999.
+    assert r.pid != 99999
+    # The system overwrote the stale pid file with the current app's PID.
+    with open(pid) as f:
+        assert int(f.read().strip()) == r.pid
+    _kill(r.pid)
+
+
 async def test_attached_stdout_lands_in_log(tmp_path):
     """An attached script's stdout/stderr are captured in the effective log."""
     log = str(tmp_path / "c.log")

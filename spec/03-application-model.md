@@ -112,11 +112,13 @@ grace) for the pid file to be written *fresh* — its mtime at/after this start.
 A pid file left over from a *previous* run (stale PID, old mtime) is not read;
 the code waits for the current start script to (re)write it.
 
-**The pid file is the source of truth.** When the start script leaves the pid
-file blank and is still running (attached), the system writes the resolved PID
-into it, so stop/watchdog read a consistent value. A *detached* script that
-exits without writing the file is left alone — its `proc.pid` is a dead shell,
-and persisting it would be wrong (readiness/watchdog flag the dead PID).
+**Resolution.** The pid file is trusted only if *fresh* (written by this run).
+A fresh file is the source of truth (a detached script wrote it). Otherwise the
+file is stale or missing: for an *attached* script the shell exec'd the app, so
+`proc.pid` is the application's PID, and the system writes it into the file so
+stop/watchdog read a consistent value. A *detached* script that exits without
+writing the file is left alone — its `proc.pid` is a dead shell, and its file
+is stale/missing, so there is nothing to persist.
 
 Both *detached* and *attached* start scripts are supported; the code never
 kills the start script on timeout. A **detached** script that backgrounds the
@@ -128,10 +130,11 @@ someapp > "$GPUSYB_LOG" 2>&1 & echo $! > "$GPUSYB_PID_FILE"
 systemctl start someapp && systemctl show -p MainPID someapp --value > "$GPUSYB_PID_FILE"
 ```
 
-An **attached** script (`exec someapp`) needs no pid file — the fallback
-`proc.pid` is the application, and the system writes it into the (blank) pid
-file. An application with no health-check URL relies on a "pid is alive"
-readiness check, so its start script must write the pid file (or be attached).
+An **attached** script (`exec someapp`, or a simple foreground command the shell
+execs) needs no pid file — `proc.pid` is the application, and the system writes
+it into the pid file (overwriting a stale value from a previous run). An
+application with no health-check URL relies on a "pid is alive" readiness check,
+so its start script must write the pid file (or be attached).
 Script failures are recorded as application events.
 
 ## 3. Networking
