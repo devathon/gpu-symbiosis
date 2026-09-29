@@ -28,16 +28,14 @@ A4_PORT = int(os.environ.get("GSYBIO_A4_PORT", 9504))
 
 def _a3_spec() -> ApplicationSpec:
     """A mock app with NO load/unload scripts — it cannot be unloaded, only stopped."""
-    pidfile = "/tmp/gpusybio-a3.pid"
-    log = "/tmp/gpusybio-a3.log"
     return ApplicationSpec(
         id="a3",
         name="plain38",
         start_script=(
             f"nohup {PY} {MOCK} --port {A3_PORT} --name plain38"
-            f" >{log} 2>&1 & echo $! > {pidfile}; sleep 0.2; echo $(cat {pidfile})"
+            f' >"$GPUSYB_LOG" 2>&1 & echo $! > "$GPUSYB_PID_FILE"'
         ),
-        stop_script=f"kill $(cat {pidfile}) 2>/dev/null; sleep 0.3; true",
+        stop_script='kill $(cat "$GPUSYB_PID_FILE") 2>/dev/null; sleep 0.3; true',
         load_script=None,  # no load/unload scripts -> supports_load_unload = False
         unload_script=None,
         port=A3_PORT,
@@ -50,16 +48,16 @@ def _a3_spec() -> ApplicationSpec:
 def _a4_spec() -> ApplicationSpec:
     """A mock app with an UNLOAD script but NO load script — unloadable, and a
     reload is a no-op that serves immediately (no load step)."""
-    pidfile = "/tmp/gpusybio-a4.pid"
-    log = "/tmp/gpusybio-a4.log"
     return ApplicationSpec(
         id="a4",
         name="unloadonly",
+        # The PID is written to $GPUSYB_PID_FILE (the effective pid path, spec
+        # 03 §2.5) — the code reads it from there, not from stdout.
         start_script=(
             f"nohup {PY} {MOCK} --port {A4_PORT} --name unloadonly"
-            f" >{log} 2>&1 & echo $! > {pidfile}; sleep 0.2; echo $(cat {pidfile})"
+            f' >"$GPUSYB_LOG" 2>&1 & echo $! > "$GPUSYB_PID_FILE"'
         ),
-        stop_script=f"kill $(cat {pidfile}) 2>/dev/null; sleep 0.3; true",
+        stop_script='kill $(cat "$GPUSYB_PID_FILE") 2>/dev/null; sleep 0.3; true',
         load_script=None,  # no load script, but ...
         unload_script=f"curl -s -X POST http://127.0.0.1:{A4_PORT}/unload",  # ... has an unload script
         port=A4_PORT,

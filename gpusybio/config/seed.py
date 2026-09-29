@@ -85,6 +85,8 @@ def _apply_app_config(row: Application, spec) -> None:
     row.stop_script = spec.stop_script
     row.load_script = spec.load_script
     row.unload_script = spec.unload_script
+    row.log_file = spec.log_file
+    row.pid_file = spec.pid_file
     row.port = spec.port
     row.protocol = spec.protocol
     row.health_check_url = spec.health_check_url

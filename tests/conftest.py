@@ -59,7 +59,7 @@ def build_app_spec(app_id, name, port, *, loaded=True, gpu_memory_mb=None, app_t
             'mkdir -p "$GPUSYB_DATA_PATH/logs" "$GPUSYB_DATA_PATH/pids"; '
             f"nohup {PY} {MOCK} --port {port} --name {name}"
             + (" --start-loaded" if loaded else "")
-            + ' >"$GPUSYB_LOG" 2>&1 & echo $! >"$GPUSYB_PID_FILE"; sleep 0.2; echo $(cat "$GPUSYB_PID_FILE")'
+            + ' >"$GPUSYB_LOG" 2>&1 & echo $! >"$GPUSYB_PID_FILE"'
         ),
         stop_script='kill $(cat "$GPUSYB_PID_FILE") 2>/dev/null; sleep 0.3; true',
         load_script=f"curl -s -X POST http://127.0.0.1:{port}/load",

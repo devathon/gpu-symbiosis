@@ -73,20 +73,54 @@ model load/unload).
 All scripts run with a controlled environment (see [12-security.md](12-security.md)):
 
 - configured working directory
-- configured environment variables (including `GPUSYB_APP_ID`, `GPUSYB_PORT`, `GPUSYB_PID`)
-- the **global data path** (`GPUSYB_DATA_PATH`) and derived `GPUSYB_LOG`
-  (`<data_path>/logs/<app_id>.log`) and `GPUSYB_PID_FILE`
-  (`<data_path>/pids/<app_id>.pid`) — the application's stdout is the log, so a
-  start script redirects it to `"$GPUSYB_LOG"` and writes the pid to
-  `"$GPUSYB_PID_FILE"` (the token metrics in [08 §5](08-metrics-module.md#5-llama-metrics)
-  are parsed from that log)
-- execution timeout
-- captured stdout / stderr
-- recorded exit code
+- configured environment variables (including `GPUSYB_APP_ID`, `GPUSYB_PORT`,
+  `GPUSYB_PID`, `GPUSYB_DATA_PATH`, `GPUSYB_LOG`, `GPUSYB_PID_FILE`)
+- the application's **log path** (`GPUSYB_LOG`) and **pid path**
+  (`GPUSYB_PID_FILE`) — the effective paths (below). The start script's stdout
+  and stderr are directed to `GPUSYB_LOG`, so the application's output is the log
+  (the token metrics in [08 §5](08-metrics-module.md#5-llama-metrics) are parsed
+  from it)
+- an execution grace for the start script (see [04 §4.1](04-application-manager.md))
+- the recorded exit code (for stop/load/unload scripts, captured stdout/stderr)
 
-The global data path is a single top-level config value (`data_path`); the log
-and pid paths are derived from it and the application id — there is no per-app
-log path. Script failures are recorded as application events.
+### Log & pid paths (per-app, with defaults)
+
+Each application may set optional `log_file` and `pid_file` paths. The
+**effective** path is the configured value if set, else the id-based default
+derived from the global data path (`data_path`, a single top-level config value):
+
+```text
+effective log path  = log_file            (if set) else <data_path>/logs/<app_id>.log
+effective pid path  = pid_file            (if set) else <data_path>/pids/<app_id>.pid
+```
+
+`GPUSYB_LOG` and `GPUSYB_PID_FILE` always point at the effective paths. The
+application's log is fresh on every start (the code opens the log file,
+truncated), so the metrics tailer's session fingerprint detects a restart.
+
+### Start-script PID contract
+
+The start script writes the application's PID to `GPUSYB_PID_FILE`. The code
+reads the PID **from the pid file** (not from the script's stdout — a start
+script such as `systemctl start someapp` cannot be expected to print the PID).
+If the pid file is empty or missing, the PID falls back to **the PID of the
+spawned script** (`proc.pid`) — which is the application's PID for an
+*attached* script (`exec app`, where the shell becomes the app).
+
+Both *detached* and *attached* start scripts are supported; the code never
+kills the start script on timeout. A **detached** script that backgrounds the
+application must write the pid file (the spawned shell's PID is not the app's):
+
+```text
+someapp > "$GPUSYB_LOG" 2>&1 & echo $! > "$GPUSYB_PID_FILE"
+# or, for a service manager:
+systemctl start someapp && systemctl show -p MainPID someapp --value > "$GPUSYB_PID_FILE"
+```
+
+An **attached** script (`exec someapp`) needs no pid file — the fallback
+`proc.pid` is the application. An application with no health-check URL relies
+on a "pid is alive" readiness check, so its start script must write the pid
+file (or be attached). Script failures are recorded as application events.
 
 ## 3. Networking
 

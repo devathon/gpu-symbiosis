@@ -14,6 +14,8 @@ const EMPTY: AppFormFields = {
   stop_script: "",
   load_script: "",
   unload_script: "",
+  log_file: null,
+  pid_file: null,
   port: 0,
   protocol: "http",
   health_check_url: "",
@@ -38,6 +40,8 @@ const fromView = (v: AppView): AppFormFields => ({
   stop_script: v.stop_script ?? "",
   load_script: v.load_script ?? "",
   unload_script: v.unload_script ?? "",
+  log_file: v.log_file ?? null,
+  pid_file: v.pid_file ?? null,
   port: v.port,
   protocol: v.protocol ?? "http",
   health_check_url: v.health_check_url ?? "",
@@ -92,6 +96,8 @@ export default function AppForm({
       stop_script: f.stop_script || null,
       load_script: f.load_script || null,
       unload_script: f.unload_script || null,
+      log_file: f.log_file || null,
+      pid_file: f.pid_file || null,
       health_check_url: f.health_check_url || null,
       ready_check_url: f.ready_check_url || null,
       cpu_memory_required_mb: num(f.cpu_memory_required_mb ? String(f.cpu_memory_required_mb) : ""),
@@ -162,6 +168,22 @@ export default function AppForm({
           </Row>
           <Row label="Stop script">
             <textarea className={inp} rows={2} value={f.stop_script ?? ""} onChange={(e) => set("stop_script", e.target.value || null)} />
+          </Row>
+          <Row label="Log file">
+            <input
+              className={inp}
+              placeholder="default: <data>/logs/<id>.log"
+              value={f.log_file ?? ""}
+              onChange={(e) => set("log_file", e.target.value || null)}
+            />
+          </Row>
+          <Row label="Pid file">
+            <input
+              className={inp}
+              placeholder="default: <data>/pids/<id>.pid"
+              value={f.pid_file ?? ""}
+              onChange={(e) => set("pid_file", e.target.value || null)}
+            />
           </Row>
         </Fieldset>
 

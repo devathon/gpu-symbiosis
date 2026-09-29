@@ -106,7 +106,7 @@ class Server:
             self.resources, self.states, self.request_manager, self.db, self.app_ids,
             app_types={a.id: a.application_type for a in app_rows},
             base_urls={a.id: f"http://127.0.0.1:{a.port}" for a in app_rows},
-            log_paths={a.id: config.app_log_path(a.id) for a in app_rows},
+            log_paths={a.id: config.effective_log_path(a.id, a.log_file) for a in app_rows},
             type_registry=self.type_registry,
         )
         # Phase 4 (spec 06 §10): automatic idle detection + unloading.

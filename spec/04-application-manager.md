@@ -103,11 +103,18 @@ projects them plus the `active` flag into the display states above.
 ```text
 1. Validate: process STOPPED or ERROR (cleaned)
 2. Set Process = STARTING
-3. T0 = process start (execute start_script, spawn + track PID)
-4. Poll readiness (see §6) every 500 ms
-5. On ready:  Process = RUNNING, Residency = LOADED
+3. T0 = process start (execute start_script; its stdout/stderr go to the
+   effective log path; the script is NEVER killed on timeout — an attached
+   script becomes the app)
+4. Resolve PID: the pid file's contents if non-empty, else the PID of the
+   spawned script (proc.pid) — see 03 §2.5
+5. If the start script exited non-zero: Process = ERROR, error = START_FAILED
+   (detail from the log tail)
+6. Poll readiness (see §6) every 500 ms
+7. On ready:  Process = RUNNING, Residency = LOADED
               startup_time = readiness_time - T0
-6. On 60 s timeout: Process = ERROR, error = STARTUP_TIMEOUT
+8. On 60 s timeout: Process = ERROR, error = STARTUP_TIMEOUT; best-effort
+   graceful stop of the resolved PID
 ```
 
 ### 4.2 Stop

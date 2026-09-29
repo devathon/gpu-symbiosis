@@ -93,6 +93,8 @@ def _app_view(row: Application, state, resources) -> dict:
         "stop_script": row.stop_script,
         "load_script": row.load_script,
         "unload_script": row.unload_script,
+        "log_file": row.log_file,
+        "pid_file": row.pid_file,
         "port": row.port,
         "protocol": row.protocol,
         "health_check_url": row.health_check_url,

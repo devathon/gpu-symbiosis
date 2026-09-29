@@ -63,6 +63,42 @@ def test_seed_creates_missing_rows(tmp_path):
     assert g.application_id == "a1"
 
 
+def test_seed_persists_log_and_pid_paths(tmp_path):
+    """The optional per-app log_file/pid_file persist through seeding (spec 03
+    §2.5) and round-trip via AppConfig.from_row."""
+    from gpusybio.applications.manager import AppConfig
+
+    db = _db(tmp_path)
+    cfg = Config(
+        applications=[_app_spec(
+            log_file="/var/log/myapp/app.log",
+            pid_file="/var/run/myapp/app.pid",
+        )],
+        gateways=[GatewaySpec(id="gw-a1", name="gw-a1", port=9511, application_id="a1")],
+    )
+    seed_database(db, cfg)
+
+    with db() as s:
+        a = s.get(Application, "a1")
+    assert a.log_file == "/var/log/myapp/app.log"
+    assert a.pid_file == "/var/run/myapp/app.pid"
+    # And the runtime view (AppConfig) carries them too.
+    acfg = AppConfig.from_row(a)
+    assert acfg.log_file == "/var/log/myapp/app.log"
+    assert acfg.pid_file == "/var/run/myapp/app.pid"
+
+    # Unset by default (NULL = the id-based default path) on a fresh DB.
+    engine = create_engine(str(tmp_path / "default.db"))
+    init_db(engine)
+    db2 = make_session_factory(engine)
+    seed_database(db2, _config())
+    with db2() as s:
+        a = s.get(Application, "a1")
+    assert a.log_file is None
+    assert a.pid_file is None
+    engine.dispose()
+
+
 def test_seed_skips_existing_app_by_default(tmp_path):
     db = _db(tmp_path)
     seed_database(db, _config())

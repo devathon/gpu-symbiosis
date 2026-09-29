@@ -37,6 +37,9 @@ class Application(Base):
     stop_script: Mapped[str | None] = mapped_column(Text)
     load_script: Mapped[str | None] = mapped_column(Text)
     unload_script: Mapped[str | None] = mapped_column(Text)
+    # Optional per-app log/pid paths (spec 03 §2.5); NULL = id-based default.
+    log_file: Mapped[str | None] = mapped_column(Text)
+    pid_file: Mapped[str | None] = mapped_column(Text)
 
     port: Mapped[int] = mapped_column(Integer)
     protocol: Mapped[str] = mapped_column(Text, default="http")

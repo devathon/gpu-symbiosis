@@ -28,6 +28,10 @@ class ApplicationSpec(BaseModel):
     stop_script: str | None = None
     load_script: str | None = None
     unload_script: str | None = None
+    # Optional per-app log/pid paths (spec 03 §2.5). When unset, the id-based
+    # defaults are used: <data_path>/logs/<id>.log and <data_path>/pids/<id>.pid.
+    log_file: str | None = None
+    pid_file: str | None = None
 
     port: int
     protocol: str = "http"
@@ -130,6 +134,11 @@ class LoadSpec(BaseModel):
 
 class StartupSpec(BaseModel):
     max_detection_sec: float = 60.0
+    # How long to wait for the start script to exit or write the pid file
+    # before falling back to the spawned script's PID (spec 03 §2.5). Detached
+    # scripts exit in milliseconds; an attached script (exec) hits this grace
+    # and resolves to proc.pid, so keep it short.
+    pid_grace_sec: float = 5.0
 
 
 class SettingsSpec(BaseModel):
@@ -166,6 +175,16 @@ class Config(BaseModel):
 
     def app_pid_path(self, app_id: str) -> str:
         return os.path.join(self.effective_data_path(), "pids", f"{app_id}.pid")
+
+    def effective_log_path(self, app_id: str, log_file: str | None = None) -> str:
+        """The app's log path: the per-app ``log_file`` if set, else the
+        id-based default (spec 03 §2.5)."""
+        return os.path.expanduser(log_file) if log_file else self.app_log_path(app_id)
+
+    def effective_pid_path(self, app_id: str, pid_file: str | None = None) -> str:
+        """The app's pid path: the per-app ``pid_file`` if set, else the
+        id-based default (spec 03 §2.5)."""
+        return os.path.expanduser(pid_file) if pid_file else self.app_pid_path(app_id)
 
 
 def load_yaml(path: str) -> Config:

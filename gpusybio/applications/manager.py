@@ -7,13 +7,20 @@ protects against repeated load failures, and watches for dead processes.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass
 
 import httpx
 
 from gpusybio.applications.lifecycle import ProcessState, ResidencyState
-from gpusybio.applications.scripts import ScriptResult, graceful_stop, run_script
+from gpusybio.applications.scripts import (
+    ScriptResult,
+    StartResult,
+    graceful_stop,
+    run_script,
+    run_start_script,
+)
 from gpusybio.database.db import SessionFactory
 from gpusybio.database.models import Application
 from gpusybio.events.bus import EventBus
@@ -32,7 +39,7 @@ from gpusybio.state import InvalidTransition, StateManager
 
 log = get_logger("appmanager")
 
-READY_POLL_SEC = 0.5
+READY_POLL_SEC = 0.1
 
 
 @dataclass
@@ -77,6 +84,9 @@ class AppConfig:
     load_time_sec: float | None = None
     unload_time_sec: float | None = None
     stop_time_sec: float | None = None
+    # Optional per-app log/pid paths (spec 03 §2.5); None = id-based default.
+    log_file: str | None = None
+    pid_file: str | None = None
 
     @classmethod
     def from_row(cls, row: Application) -> "AppConfig":
@@ -97,6 +107,8 @@ class AppConfig:
             load_script=row.load_script,
             unload_script=row.unload_script,
             port=row.port,
+            log_file=row.log_file,
+            pid_file=row.pid_file,
             health_check_url=row.health_check_url,
             health_check_method=row.health_check_method,
             health_check_timeout=row.health_check_timeout,
@@ -166,6 +178,30 @@ class ApplicationManager:
         for i in ids:
             self.load_config(i)
 
+    # -- effective log/pid paths (spec 03 §2.5) ----------------------------
+    def _effective_log_path(self, cfg: AppConfig) -> str:
+        """The app's log path: ``log_file`` if set, else the id-based default."""
+        if cfg.log_file:
+            return os.path.expanduser(cfg.log_file)
+        return os.path.join(self._data_path, "logs", f"{cfg.id}.log")
+
+    def _effective_pid_path(self, cfg: AppConfig) -> str:
+        """The app's pid path: ``pid_file`` if set, else the id-based default."""
+        if cfg.pid_file:
+            return os.path.expanduser(cfg.pid_file)
+        return os.path.join(self._data_path, "pids", f"{cfg.id}.pid")
+
+    def _log_tail(self, path: str, n: int = 500) -> str:
+        """The last ``n`` bytes of a log (for start-failure detail, spec 04 §4.1)."""
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - n))
+                return f.read().decode("utf-8", "replace").strip()
+        except OSError:
+            return ""
+
     def state(self, app_id: str):
         return self._states.get(app_id)
 
@@ -208,7 +244,7 @@ class ApplicationManager:
         return False
 
     # -- start (spec 04 §4.1) ----------------------------------------------
-    async def start(self, app_id: str) -> ScriptResult | None:
+    async def start(self, app_id: str) -> StartResult | None:
         cfg = self.config(app_id)
         try:
             self._states.begin_transition(app_id, "start")
@@ -222,14 +258,31 @@ class ApplicationManager:
         self._states.set_process(app_id, ProcessState.STARTING)
         await self._emit("START", app_id=app_id)
 
-        result = await run_script(cfg.start_script, app_id=app_id, port=cfg.port, timeout=30.0, data_path=self._data_path)
-        pid = _parse_pid(result)
-        if result.exit_code != 0 or pid is None:
+        log_path = self._effective_log_path(cfg)
+        result = await run_start_script(
+            cfg.start_script,
+            app_id=app_id,
+            port=cfg.port,
+            log_path=log_path,
+            pid_path=self._effective_pid_path(cfg),
+            data_path=self._data_path,
+            grace=self._settings.startup.pid_grace_sec,
+        )
+        if result.error is not None:
             self._states.set_process(app_id, ProcessState.ERROR)
             self._states.finish_transition(app_id)
-            await self._emit(
-                "START_FAILED", app_id=app_id, detail=result.stderr.strip()[:500] or "start failed"
-            )
+            await self._emit("START_FAILED", app_id=app_id, detail=result.error)
+            return result
+        pid = result.pid
+        # A start script that exited non-zero (detached) is a failure; an
+        # *attached* script (exit_code None, still running) is judged by the
+        # readiness check below. The PID is the pid file's contents, else the
+        # spawned script's PID (spec 03 §2.5).
+        if result.exit_code is not None and result.exit_code != 0:
+            self._states.set_process(app_id, ProcessState.ERROR)
+            self._states.finish_transition(app_id)
+            detail = self._log_tail(log_path) or "start script failed"
+            await self._emit("START_FAILED", app_id=app_id, detail=detail)
             return result
         self._states.set_pid(app_id, pid)
         s.pid = pid
@@ -254,9 +307,8 @@ class ApplicationManager:
         self._states.set_process(app_id, ProcessState.ERROR)
         self._states.finish_transition(app_id)
         await self._emit(START_TIMEOUT, app_id=app_id, detail=f"{timeout}s")
-        if pid is not None:
-            await graceful_stop(pid)
-            self._states.set_pid(app_id, None)
+        await graceful_stop(pid)
+        self._states.set_pid(app_id, None)
         return result
 
     # -- stop (spec 04 §4.2) ------------------------------------------------
@@ -287,7 +339,10 @@ class ApplicationManager:
 
         pid = s.pid
         if cfg.stop_script and pid is not None:
-            result = await run_script(cfg.stop_script, app_id=app_id, pid=pid, timeout=30.0, data_path=self._data_path)
+            result = await run_script(
+                cfg.stop_script, app_id=app_id, pid=pid, timeout=30.0, data_path=self._data_path,
+                log_path=self._effective_log_path(cfg), pid_path=self._effective_pid_path(cfg),
+            )
         elif pid is not None:
             result = await graceful_stop(pid)
         else:
@@ -330,7 +385,10 @@ class ApplicationManager:
         await self._emit("LOAD", app_id=app_id, required_mb=round(required, 1))
 
         if cfg.load_script:
-            result = await run_script(cfg.load_script, app_id=app_id, pid=s.pid, timeout=120.0, data_path=self._data_path)
+            result = await run_script(
+                cfg.load_script, app_id=app_id, pid=s.pid, timeout=120.0, data_path=self._data_path,
+                log_path=self._effective_log_path(cfg), pid_path=self._effective_pid_path(cfg),
+            )
         else:
             result = ScriptResult(0, "", "no load script", False)
 
@@ -398,7 +456,10 @@ class ApplicationManager:
         await self._emit("UNLOAD", app_id=app_id)
 
         if cfg.unload_script:
-            result = await run_script(cfg.unload_script, app_id=app_id, timeout=60.0, data_path=self._data_path)
+            result = await run_script(
+                cfg.unload_script, app_id=app_id, timeout=60.0, data_path=self._data_path,
+                log_path=self._effective_log_path(cfg), pid_path=self._effective_pid_path(cfg),
+            )
         else:
             result = ScriptResult(0, "", "no unload script", False)
 
@@ -511,18 +572,6 @@ class ApplicationManager:
                                        detail=str(data.get("detail", "")) or None))
         except Exception:  # noqa: BLE001 - persistence must never break lifecycle
             pass
-
-
-def _parse_pid(result: ScriptResult) -> int | None:
-    """Parse the PID the start script prints (last non-empty line, digits)."""
-    import re
-
-    lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
-    for ln in reversed(lines):
-        m = re.fullmatch(r"\s*(\d+)\s*", ln)
-        if m:
-            return int(m.group(1))
-    return None
 
 
 def _pid_alive(pid: int) -> bool:

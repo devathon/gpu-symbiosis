@@ -32,6 +32,8 @@ export interface AppView {
   stop_script: string | null;
   load_script: string | null;
   unload_script: string | null;
+  log_file: string | null;
+  pid_file: string | null;
   port: number;
   protocol: string;
   health_check_url: string | null;
@@ -250,6 +252,8 @@ export interface AppFormFields {
   stop_script: string | null;
   load_script: string | null;
   unload_script: string | null;
+  log_file: string | null;
+  pid_file: string | null;
   port: number;
   protocol: string;
   health_check_url: string | null;

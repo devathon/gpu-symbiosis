@@ -67,8 +67,9 @@ Additional requirements:
 - scripts run as a configured user (default: the service user, not root)
 - no privileged capability escalation; the service user needs only what the
   application processes need
-- environment injected: `GPUSYB_APP_ID`, `GPUSYB_PORT`, `GPUSYB_PID`,
-  `GPUSYB_STATE` (start|stop|load|unload)
+- environment injected: `GPUSYB_APP_ID`, `GPUSYB_PORT`, `GPUSYB_PID`
+  (stop/load/unload), `GPUSYB_DATA_PATH`, `GPUSYB_LOG` and `GPUSYB_PID_FILE`
+  (the effective log/pid paths, spec 03 §2.5)
 - **record script failures**: exit code, timed-out flag, last N lines of
   stdout/stderr — stored on the event and shown in the UI
 
