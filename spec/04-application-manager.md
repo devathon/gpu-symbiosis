@@ -106,11 +106,13 @@ projects them plus the `active` flag into the display states above.
 3. T0 = process start (execute start_script; its stdout/stderr go to the
    effective log path; the script is NEVER killed on timeout — an attached
    script becomes the app)
-4. Resolve PID: the pid file's contents if non-empty, else the PID of the
-   spawned script (proc.pid) — see 03 §2.5
+4. Resolve PID: the pid file's contents if freshly written (mtime at/after
+   this start), else the PID of the spawned script (proc.pid) — see 03 §2.5.
+   If the script left the pid file blank and is still running (attached), the
+   system writes the resolved PID into it.
 5. If the start script exited non-zero: Process = ERROR, error = START_FAILED
    (detail from the log tail)
-6. Poll readiness (see §6) every 500 ms
+6. Poll readiness (see §6) every 1 s
 7. On ready:  Process = RUNNING, Residency = LOADED
               startup_time = readiness_time - T0
 8. On 60 s timeout: Process = ERROR, error = STARTUP_TIMEOUT; best-effort

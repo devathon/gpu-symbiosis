@@ -125,6 +125,37 @@ def _pid_file_has_content(path: str) -> bool:
         return False
 
 
+def _pid_file_is_fresh(path: str, t_start: float) -> bool:
+    """True when the pid file has content AND was written at/after ``t_start``.
+
+    A pid file left over from a *previous* run holds a stale PID; its mtime
+    predates this start (``t_start``). We must not read that stale value — we
+    wait for the current start script to (re)write it (spec 03 §2.5). A small
+    buffer absorbs wall-clock precision between ``time.time()`` and the
+    filesystem mtime.
+    """
+    try:
+        if not open(path, "r", encoding="utf-8").read().strip():
+            return False
+        return os.path.getmtime(path) >= t_start - 1.0
+    except OSError:
+        return False
+
+
+def _write_pid_file(path: str, pid: int) -> None:
+    """Ensure the pid file holds ``pid`` (spec 03 §2.5).
+
+    The start script's job is to write the pid file; when it leaves it blank
+    (e.g. an attached ``exec app`` script), the system writes the resolved PID
+    so the file is the single source of truth for stop/watchdog.
+    """
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{pid}\n")
+    except OSError:
+        pass
+
+
 async def run_start_script(
     script: str,
     *,
@@ -147,9 +178,15 @@ async def run_start_script(
 
     Unlike :func:`run_script`, the script is **never killed on timeout**: an
     *attached* script (``exec app``) becomes the application and never exits.
-    We wait up to ``grace`` for the script to exit OR the pid file to be
-    written, then resolve the PID. Detached scripts exit in milliseconds;
-    attached scripts hit the grace and resolve to ``proc.pid``.
+    We wait up to ``grace`` (in 1s steps) for the script to exit OR the pid
+    file to be written *fresh* (mtime at/after this start — a stale file from a
+    previous run is ignored), then resolve the PID. Detached scripts exit in
+    milliseconds; attached scripts hit the grace and resolve to ``proc.pid``.
+
+    The pid file is the source of truth: when the script leaves it blank and is
+    still running (attached), the system writes the resolved PID into it. A
+    detached script that exited without writing it is left alone (its
+    ``proc.pid`` is a dead shell).
     """
     env = {
         **os.environ,
@@ -177,15 +214,23 @@ async def run_start_script(
     except (OSError, ValueError) as e:
         return StartResult(127, 0, None, f"spawn failed: {e}")  # type: ignore[arg-type]
 
+    t_start = time.time()  # wall clock: compared against the pid file mtime
     t0 = time.monotonic()
     while time.monotonic() - t0 < grace:
-        if _pid_file_has_content(pid_path):
+        if _pid_file_is_fresh(pid_path, t_start):
             break
         if proc.returncode is not None:  # script exited (detached)
             break
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(1.0)
 
     pid = _read_pid_file(pid_path) or proc.pid
+    # The pid file is the source of truth: if the script left it blank AND the
+    # script is still running (attached, ``proc.pid`` is the app), write the
+    # resolved PID so stop/watchdog read a consistent value (spec 03 §2.5). A
+    # detached script that exited without writing the file has a dead-shell
+    # ``proc.pid`` — writing it would be wrong (readiness/watchdog flags it).
+    if proc.returncode is None and not _pid_file_has_content(pid_path):
+        _write_pid_file(pid_path, pid)
     return StartResult(proc.returncode, pid, proc)
 
 

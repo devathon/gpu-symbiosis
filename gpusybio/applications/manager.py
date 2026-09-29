@@ -39,7 +39,7 @@ from gpusybio.state import InvalidTransition, StateManager
 
 log = get_logger("appmanager")
 
-READY_POLL_SEC = 0.1
+READY_POLL_SEC = 1.0
 
 
 @dataclass

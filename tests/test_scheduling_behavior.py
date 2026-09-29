@@ -140,9 +140,12 @@ async def test_emergency_overrides_min_residency():
             await _a1_resident(c)
             t0 = time.monotonic()
 
-            # A1 busy (~3.2 s, inside the 5 s residency window); A2 waits past 2 s.
+            # A1 busy (~4.0 s, inside the 5 s residency window); A2 waits past 2 s.
+            # The drain decision needs a reconcile tick (1 s cadence) landing in the
+            # window [a2 waited 2 s, a1 completes]; ~4 s keeps ≥2 ticks in that window
+            # so the drain is robust to tick phase, while still beating the 5 s window.
             a1_task = asyncio.create_task(_stream(c, f"http://127.0.0.1:{A1_GW}/generate",
-                                                  {"chunks": 12, "delay": 0.25}))
+                                                  {"chunks": 16, "delay": 0.25}))
             await asyncio.sleep(0.3)
             r = await c.post(f"http://127.0.0.1:{A2_GW}/generate", json={"chunks": 3, "delay": 0.05},
                             timeout=60.0)

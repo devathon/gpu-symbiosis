@@ -134,10 +134,12 @@ class LoadSpec(BaseModel):
 
 class StartupSpec(BaseModel):
     max_detection_sec: float = 60.0
-    # How long to wait for the start script to exit or write the pid file
-    # before falling back to the spawned script's PID (spec 03 §2.5). Detached
-    # scripts exit in milliseconds; an attached script (exec) hits this grace
-    # and resolves to proc.pid, so keep it short.
+    # How long (in 1s steps) to wait for the start script to exit or to write
+    # the pid file *fresh* (mtime at/after this start — a stale file from a
+    # previous run is ignored) before falling back to the spawned script's PID
+    # (spec 03 §2.5). Detached scripts exit in milliseconds; an attached script
+    # (exec) hits this grace and resolves to proc.pid (which the system then
+    # writes into the blank pid file), so keep it short.
     pid_grace_sec: float = 5.0
 
 

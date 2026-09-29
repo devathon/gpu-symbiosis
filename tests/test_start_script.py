@@ -71,6 +71,66 @@ async def test_attached_pid_fallback_to_proc_pid(tmp_path):
     _kill(r.pid)
 
 
+async def test_attached_blank_pidfile_is_written(tmp_path):
+    """Issue: an attached script (exec) leaves the pid file blank — the system
+    writes the resolved PID (``proc.pid``) so the file is the source of truth
+    for stop/watchdog (spec 03 §2.5)."""
+    log = str(tmp_path / "w.log")
+    pid = str(tmp_path / "w.pid")  # never written by the script
+    r = await run_start_script(
+        "exec sleep 30",
+        app_id="w1", log_path=log, pid_path=pid, grace=2.0,
+    )
+    assert r.exit_code is None
+    assert _alive(r.pid)
+    # The system wrote the resolved PID into the blank pid file.
+    with open(pid) as f:
+        assert int(f.read().strip()) == r.pid
+    _kill(r.pid)
+
+
+async def test_detached_exit_blank_pidfile_not_written(tmp_path):
+    """A detached script that exits WITHOUT writing the pid file: ``proc.pid``
+    is a dead shell, so the system must NOT write it (readiness/watchdog flag
+    the dead pid). The PID still resolves to ``proc.pid`` for reporting."""
+    log = str(tmp_path / "x.log")
+    pid = str(tmp_path / "x.pid")  # never written by the script
+    r = await run_start_script(
+        "true",  # exits immediately, writes nothing
+        app_id="x1", log_path=log, pid_path=pid, grace=2.0,
+    )
+    assert r.exit_code == 0
+    # The dead-shell PID is NOT persisted into the pid file.
+    assert not os.path.exists(pid) or not open(pid).read().strip()
+
+
+async def test_stale_pidfile_not_read(tmp_path):
+    """Issue: a pid file left over from a *previous* run holds a stale PID.
+    The code must not read it — it waits for the current start script to
+    (re)write the file (fresh mtime) (spec 03 §2.5)."""
+    import time as _time
+    log = str(tmp_path / "s.log")
+    pid = str(tmp_path / "s.pid")
+    # Pre-seed a stale pid file (from a previous run): content + old mtime.
+    with open(pid, "w") as f:
+        f.write("99999\n")
+    old = _time.time() - 120  # 2 minutes ago (well before this start)
+    os.utime(pid, (old, old))
+    # The start script overwrites the pid file with the real app PID.
+    r = await run_start_script(
+        f"sleep 30 >/dev/null 2>&1 & echo $! > {pid}",
+        app_id="s1", log_path=log, pid_path=pid, grace=5.0,
+    )
+    assert r.error is None
+    with open(pid) as f:
+        expected = int(f.read().strip())
+    # The resolved PID is the CURRENT run's app, not the stale 99999.
+    assert r.pid == expected
+    assert r.pid != 99999
+    assert _alive(r.pid)
+    _kill(r.pid)
+
+
 async def test_attached_stdout_lands_in_log(tmp_path):
     """An attached script's stdout/stderr are captured in the effective log."""
     log = str(tmp_path / "c.log")

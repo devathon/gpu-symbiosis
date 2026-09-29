@@ -107,6 +107,17 @@ If the pid file is empty or missing, the PID falls back to **the PID of the
 spawned script** (`proc.pid`) — which is the application's PID for an
 *attached* script (`exec app`, where the shell becomes the app).
 
+**Stale pid files are ignored.** The code waits (in 1s steps, up to the start
+grace) for the pid file to be written *fresh* — its mtime at/after this start.
+A pid file left over from a *previous* run (stale PID, old mtime) is not read;
+the code waits for the current start script to (re)write it.
+
+**The pid file is the source of truth.** When the start script leaves the pid
+file blank and is still running (attached), the system writes the resolved PID
+into it, so stop/watchdog read a consistent value. A *detached* script that
+exits without writing the file is left alone — its `proc.pid` is a dead shell,
+and persisting it would be wrong (readiness/watchdog flag the dead PID).
+
 Both *detached* and *attached* start scripts are supported; the code never
 kills the start script on timeout. A **detached** script that backgrounds the
 application must write the pid file (the spawned shell's PID is not the app's):
@@ -118,9 +129,10 @@ systemctl start someapp && systemctl show -p MainPID someapp --value > "$GPUSYB_
 ```
 
 An **attached** script (`exec someapp`) needs no pid file — the fallback
-`proc.pid` is the application. An application with no health-check URL relies
-on a "pid is alive" readiness check, so its start script must write the pid
-file (or be attached). Script failures are recorded as application events.
+`proc.pid` is the application, and the system writes it into the (blank) pid
+file. An application with no health-check URL relies on a "pid is alive"
+readiness check, so its start script must write the pid file (or be attached).
+Script failures are recorded as application events.
 
 ## 3. Networking
 
