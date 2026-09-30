@@ -52,11 +52,23 @@ def test_loaded_application_types():
 
 def test_custom_spec_from_app_config():
     reg = make_type_registry()
-    row = type("Row", (), {"description": json.dumps({"metrics": [
+    metrics = [
         {"id": "queue_depth", "name": "Queue depth", "unit": "req", "kind": "gauge",
          "source": "handler", "display": "card",
          "collect": {"url": "/stats", "json_path": "queue.depth"}},
-    ]})})
+    ]
+    # the dedicated ``metrics`` column (a JSON document) is the primary source —
+    # a plain human description alongside it is ignored
+    row = type("Row", (), {"metrics": json.dumps(metrics), "description": "My app"})
+    spec = reg.spec_for("custom", row)
+    assert spec.type == "custom"
+    assert spec.metric("queue_depth").collect["url"] == "/stats"
+    # a human description alone -> generic (no declared metrics)
+    assert reg.spec_for(
+        "custom", type("Row", (), {"metrics": None, "description": "My app"})) is GENERIC_SPEC
+    # legacy: the description-carried {"metrics": [...]} JSON still works
+    row = type("Row", (), {"metrics": None,
+                          "description": json.dumps({"metrics": metrics})})
     spec = reg.spec_for("custom", row)
     assert spec.type == "custom"
     assert spec.metric("queue_depth").collect["url"] == "/stats"

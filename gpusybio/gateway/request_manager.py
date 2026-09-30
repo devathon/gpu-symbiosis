@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
-from gpusybio.config.seed import new_request_id
-from gpusybio.database.db import SessionFactory
+from gpusybio.database.db import SessionFactory, dt_naive
 from gpusybio.database.models import Request
 from gpusybio.events.bus import (
     NEW_REQUEST,
@@ -29,6 +29,10 @@ from gpusybio.scoring import DemandTracker
 from gpusybio.state import StateManager
 
 log = get_logger("requestmanager")
+
+
+def new_request_id() -> str:
+    return f"req-{uuid.uuid4().hex[:12]}"
 
 
 class RequestManager:
@@ -166,7 +170,8 @@ class RequestManager:
         except Exception:  # noqa: BLE001
             return False
 
-    def _app_limit(self, app_id: str) -> int:
+    def app_limit(self, app_id: str) -> int:
+        """Max concurrent in-flight requests for an app (spec 05 §6)."""
         cfg = self._app_configs.get(app_id)
         if cfg is not None:
             return cfg.get("max_concurrent_requests", 1)
@@ -185,7 +190,7 @@ class RequestManager:
             return False
         if s.draining:
             return False
-        if len(self._active.get(app_id, ())) >= self._app_limit(app_id):
+        if len(self._active.get(app_id, ())) >= self.app_limit(app_id):
             return False
         return True
 
@@ -206,7 +211,7 @@ class RequestManager:
             self._queue.enqueue(slot)  # not ready — back in the queue for the scheduler
             return None
         async with self._lock:
-            if len(self._active.get(app_id, ())) >= self._app_limit(app_id):
+            if len(self._active.get(app_id, ())) >= self.app_limit(app_id):
                 self._queue.enqueue(slot)  # back to the queue
                 return None
             self._active.setdefault(app_id, set()).add(request_id)
@@ -300,8 +305,8 @@ class RequestManager:
                         application_id=slot.application_id,
                         status=status,
                         priority=slot.priority,
-                        queued_at=_dt(slot.queued_at),
-                        received_at=_dt(slot.queued_at),
+                        queued_at=dt_naive(slot.queued_at),
+                        received_at=dt_naive(slot.queued_at),
                     )
                 )
         except Exception:  # noqa: BLE001 - persistence must never break the request path
@@ -317,7 +322,7 @@ class RequestManager:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
     ) -> None:
-        now = _dt(time.time())
+        now = dt_naive(time.time())
         try:
             with self._db() as s:
                 row = s.get(Request, request_id)
@@ -357,10 +362,3 @@ class RequestManager:
             )
         except Exception:  # noqa: BLE001
             return None
-
-
-def _dt(ts: float):
-    """Naive-UTC datetime (SQLite stores naive; keep subtraction consistent)."""
-    from datetime import datetime, timezone
-
-    return datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)

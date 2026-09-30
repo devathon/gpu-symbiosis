@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime, timezone
 
 from sqlalchemy import create_engine as _sa_create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from gpusybio.database import models  # noqa: F401  (register mappings)
+
+
+def dt_naive(ts: float) -> datetime:
+    """Naive-UTC datetime for the DB (SQLite stores naive; keep subtraction
+    consistent). Read sites treat naive values as UTC (spec 04 §9)."""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
 
 
 def create_engine(db_path: str) -> Engine:

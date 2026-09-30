@@ -27,11 +27,10 @@ from gpusybio.auth.admin import (
     validate_session,
     verify_admin,
 )
-from gpusybio.config.seed import new_request_id
 from gpusybio.database.models import Application, Gateway, Request as RequestModel
 from gpusybio.events.bus import PERSISTENT_EVENTS
 from gpusybio.events.sse import SSEHub
-from gpusybio.gateway.request_manager import RequestManager
+from gpusybio.gateway.request_manager import RequestManager, new_request_id
 from gpusybio.metrics import MetricsCollector
 from gpusybio.scoring import gateway_score
 from gpusybio.state import StateManager
@@ -106,7 +105,39 @@ def _app_view(row: Application, state, resources) -> dict:
         "idle_threshold_gpu_pct": row.idle_threshold_gpu_pct,
         "memory_load_threshold_pct": row.memory_load_threshold_pct,
         "memory_unload_threshold_pct": row.memory_unload_threshold_pct,
+        # The ``custom`` type's declared metrics (spec 08 §9.6) — the edit view
+        # pre-fills its fields from this; None for types without declared metrics.
+        "metrics": _app_metrics(row),
     }
+
+
+def _app_metrics(row) -> list | None:
+    """The custom type's metric list, parsed from its JSON document column."""
+    if not row.metrics:
+        return None
+    try:
+        data = json.loads(row.metrics)
+    except Exception:  # noqa: BLE001
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _coerce_metrics(value) -> str | None:
+    """Normalize a client-supplied ``metrics`` value (a list, the legacy
+    ``{"metrics": [...]}`` object, or an already-serialized JSON string) into
+    the stored JSON-document form (a string), or None when unset."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            data = json.loads(value)
+        except Exception:  # noqa: BLE001
+            raise HTTPException(400, "metrics must be a JSON array or object")
+    else:
+        data = value
+    if not isinstance(data, (list, dict)):
+        raise HTTPException(400, "metrics must be a JSON array or object")
+    return json.dumps(data)
 
 
 def _gw_score(rm: RequestManager, row: Gateway) -> dict | None:
@@ -355,6 +386,9 @@ def make_admin_api(
     @api.post("/api/applications", status_code=201)
     async def create_application(body: dict, request: Request):
         try:
+            body = dict(body)
+            if "metrics" in body:
+                body["metrics"] = _coerce_metrics(body["metrics"])
             row = Application(id=body["id"], **{k: v for k, v in body.items() if k != "id"})
             # Kept in sync (a cache for direct DB readers); the source of truth
             # is ``unload_script`` — read sites derive the flag from it.
@@ -398,6 +432,8 @@ def make_admin_api(
                 raise HTTPException(404, "not found")
             for k, v in body.items():
                 if hasattr(row, k) and k not in ("id",):
+                    if k == "metrics":
+                        v = _coerce_metrics(v)
                     setattr(row, k, v)
             # Kept in sync (a cache for direct DB readers); the source of truth
             # is ``unload_script`` — read sites derive the flag from it.

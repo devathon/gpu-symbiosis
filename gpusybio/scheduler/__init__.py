@@ -342,9 +342,9 @@ class Scheduler:
                     continue
                 if self._rm.queued_count(res) <= 0:
                     continue
-                if self._rm.active_count(res) >= self._rm._app_limit(res):
+                if self._rm.active_count(res) >= self._rm.app_limit(res):
                     continue
-                free = self._rm._app_limit(res) - self._rm.active_count(res)
+                free = self._rm.app_limit(res) - self._rm.active_count(res)
                 fwd = self._forward(res, free)
                 return await self._decide(
                     trigger, None, None, "activate_concurrent", 0.0, 0.0, 0.0,
@@ -384,7 +384,7 @@ class Scheduler:
                         detail=f"{app_id} draining ({self._rm.active_count(app_id)} active)",
                         scores=csc, active=app_id,
                     )
-                limit = self._rm._app_limit(app_id)
+                limit = self._rm.app_limit(app_id)
                 free = limit - self._rm.active_count(app_id)
                 if free > 0:
                     fwd = self._forward(app_id, min(free, self._rm.queued_count(app_id)))
@@ -408,7 +408,7 @@ class Scheduler:
                     and st.residency is ResidencyState.LOADED
                 )
                 if ok:
-                    fwd = self._forward(app_id, self._rm._app_limit(app_id))
+                    fwd = self._forward(app_id, self._rm.app_limit(app_id))
                     return await self._decide(
                         trigger, cand, None, "activate_concurrent", csc["score"], 0.0, 0.0,
                         detail=f"loaded {app_id} concurrently alongside {self.residents()}",
@@ -687,7 +687,7 @@ class Scheduler:
             st.process is ProcessState.RUNNING and st.residency is ResidencyState.LOADED
         )
         if ok:
-            self._forward(app_id, self._rm._app_limit(app_id))
+            self._forward(app_id, self._rm.app_limit(app_id))
             await self._emit("SWITCH_IN", application_id=app_id, trigger=trigger)
         return ok
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 
 from gpusybio.config.models import Config
 from gpusybio.database.db import SessionFactory
@@ -113,6 +112,9 @@ def _apply_app_config(row: Application, spec) -> None:
     row.api_enabled = spec.api_enabled
     row.supports_queueing = spec.supports_queueing
     row.max_concurrent_requests = spec.max_concurrent_requests
+    row.metrics = (
+        json.dumps([m.model_dump() for m in spec.metrics]) if spec.metrics else None
+    )
     row.enabled = spec.enabled
     if row.observed_max_gpu_memory_mb is None:
         row.observed_max_gpu_memory_mb = spec.gpu_memory_mb
@@ -132,7 +134,3 @@ def _apply_gateway_config(row: Gateway, spec, gid: str) -> None:
     row.request_timeout_sec = spec.request_timeout_sec
     row.max_concurrent_requests = spec.max_concurrent_requests
     row.enabled = spec.enabled
-
-
-def new_request_id() -> str:
-    return f"req-{uuid.uuid4().hex[:12]}"

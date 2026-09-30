@@ -78,6 +78,10 @@ class Application(Base):
     api_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     supports_queueing: Mapped[bool] = mapped_column(Boolean, default=True)
     max_concurrent_requests: Mapped[int] = mapped_column(Integer, default=1)
+    # The ``custom`` type's declared metrics (spec 08 §9.6) — a JSON document
+    # (list of metric defs), editable via the API without touching the
+    # human-readable description. init_db auto-ALTERs this column in (spec 16).
+    metrics: Mapped[str | None] = mapped_column(Text)
 
     consecutive_load_failures: Mapped[int] = mapped_column(Integer, default=0)
     faulted_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

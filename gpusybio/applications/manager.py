@@ -21,7 +21,7 @@ from gpusybio.applications.scripts import (
     run_script,
     run_start_script,
 )
-from gpusybio.database.db import SessionFactory
+from gpusybio.database.db import SessionFactory, dt_naive
 from gpusybio.database.models import Application
 from gpusybio.events.bus import EventBus
 from gpusybio.events.bus import (
@@ -531,7 +531,7 @@ class ApplicationManager:
             faulted_until = time.time() + 300.0
             with self._db() as s:
                 row = s.get(Application, app_id)
-                row.faulted_until = _dt(faulted_until)
+                row.faulted_until = dt_naive(faulted_until)
             self._configs[app_id] = self.load_config(app_id)
             await self._emit(FAULTED, app_id=app_id, detail=f"{n} consecutive failures")
             log.error("application faulted", application_id=app_id, failures=n)
@@ -586,7 +586,4 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def _dt(ts: float):
-    from datetime import datetime, timezone
 
-    return datetime.fromtimestamp(ts, tz=timezone.utc)

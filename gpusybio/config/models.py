@@ -17,6 +17,25 @@ AppType = str
 WaitPolicy = Literal["REJECT", "EXPIRE", "ESCALATE_PRIORITY", "PROCESS_ANYWAY"]
 
 
+class CustomMetricSpec(BaseModel):
+    """One user-declared metric of the ``custom`` application type (spec 08 §9.6).
+
+    The generic handler interprets the ``collect`` mapping (url + json_path) —
+    no code required. Stored as a JSON document in the application row's
+    dedicated ``metrics`` column, NOT in the human-readable ``description``.
+    """
+
+    id: str
+    name: str
+    kind: str = "gauge"  # gauge | counter | rate
+    unit: str = ""
+    source: str = "handler"  # handler | proxy | derived
+    display: str = "card"  # card | chart
+    group: str | None = None
+    collect: dict = Field(default_factory=dict)  # handler fetch mapping
+    aggregation: str | None = None  # avg | sum | max | min | last | percentile_95
+
+
 class ApplicationSpec(BaseModel):
     """One managed GPU workload (spec 03)."""
 
@@ -41,6 +60,8 @@ class ApplicationSpec(BaseModel):
     ready_check_url: str | None = None
 
     application_type: AppType = "custom"
+    # The ``custom`` type's declared metrics (spec 08 §9.6); ignored by other types.
+    metrics: list[CustomMetricSpec] | None = None
 
     gpu_memory_mb: int = Field(ge=1)
     gpu_usage_pct: float | None = Field(default=None, ge=0, le=100)

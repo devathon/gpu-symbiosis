@@ -158,20 +158,37 @@ def load_application_types(registry: TypePluginRegistry,
                 log.exception("type plugin %s failed to load — skipped", fn)
 
 
-def _custom_spec(row) -> TypeSpec | None:
-    """Read a custom type's metric list from its config (spec 08 §9)."""
-    raw = getattr(row, "description", None)
-    if raw and raw.startswith("{"):
+def _custom_metrics_list(row) -> list[dict] | None:
+    """The custom type's metric list (spec 08 §9.6), as declared dicts.
+
+    Reads the application's dedicated ``metrics`` column (a JSON document,
+    editable via the API without touching the human-readable description)
+    first; falls back to the legacy ``description``-carried JSON for
+    pre-migration rows that never set the column. The document is either the
+    metric list itself or a ``{"metrics": [...]}`` wrapper (the legacy
+    description shape); both are accepted."""
+    for raw in (getattr(row, "metrics", None), getattr(row, "description", None)):
+        if not raw:
+            continue
         try:
             data = json.loads(raw)
         except Exception:  # noqa: BLE001
-            return None
-        metrics = data.get("metrics") if isinstance(data, dict) else None
-        if metrics:
-            return TypeSpec("custom", [
-                MetricDef(**{k: m.get(k, {}) for k in (
-                    "id", "name", "kind", "unit", "source", "display", "collect",
-                    "aggregation") if isinstance(m, dict) and m.get(k) is not None})
-                for m in metrics
-            ])
+            continue
+        if isinstance(data, dict):
+            data = data.get("metrics")
+        if isinstance(data, list) and data:
+            return [m for m in data if isinstance(m, dict)] or None
+    return None
+
+
+def _custom_spec(row) -> TypeSpec | None:
+    """Read a custom type's spec from its config (spec 08 §9.6)."""
+    metrics = _custom_metrics_list(row)
+    if metrics:
+        return TypeSpec("custom", [
+            MetricDef(**{k: m.get(k, {}) for k in (
+                "id", "name", "kind", "unit", "source", "display", "collect",
+                "aggregation") if isinstance(m, dict) and m.get(k) is not None})
+            for m in metrics if isinstance(m, dict) and m.get("id")
+        ])
     return None

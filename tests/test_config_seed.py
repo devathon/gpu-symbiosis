@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import json
 
-from gpusybio.config.models import ApplicationSpec, Config, GatewaySpec
+from gpusybio.config.models import (
+    ApplicationSpec,
+    Config,
+    CustomMetricSpec,
+    GatewaySpec,
+)
 from gpusybio.config.seed import seed_database
 from gpusybio.database.db import create_engine, init_db, make_session_factory
 from gpusybio.database.models import Application, Gateway, Setting
@@ -96,6 +101,39 @@ def test_seed_persists_log_and_pid_paths(tmp_path):
         a = s.get(Application, "a1")
     assert a.log_file is None
     assert a.pid_file is None
+    engine.dispose()
+
+
+def test_seed_persists_custom_metrics(tmp_path):
+    """The ``custom`` type's declared metrics (spec 08 §9.6) persist into the
+    dedicated JSON column, round-trip as a list, and stay NULL when unset."""
+    db = _db(tmp_path)
+    cfg = Config(
+        applications=[_app_spec(metrics=[
+            CustomMetricSpec(
+                id="queue_depth", name="Queue depth", unit="req",
+                collect={"url": "/stats", "json_path": "queue.depth"},
+            ),
+        ])],
+        gateways=[GatewaySpec(id="gw-a1", name="gw-a1", port=9511, application_id="a1")],
+    )
+    seed_database(db, cfg)
+
+    with db() as s:
+        a = s.get(Application, "a1")
+    assert a.metrics is not None
+    stored = json.loads(a.metrics)
+    assert stored[0]["id"] == "queue_depth"
+    assert stored[0]["collect"]["json_path"] == "queue.depth"
+
+    # Unset -> NULL (the registry falls back to the legacy description then).
+    engine = create_engine(str(tmp_path / "default.db"))
+    init_db(engine)
+    db2 = make_session_factory(engine)
+    seed_database(db2, _config())
+    with db2() as s:
+        a = s.get(Application, "a1")
+    assert a.metrics is None
     engine.dispose()
 
 
