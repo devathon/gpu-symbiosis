@@ -16,13 +16,24 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from gpusybio.database.db import SessionFactory
-from gpusybio.database.models import MetricAggregate, MetricSample
+from gpusybio.database.models import (
+    ApplicationEvent,
+    GatewayEvent,
+    MetricAggregate,
+    MetricSample,
+    SchedulerEvent,
+)
 from gpusybio.events.log import get_logger
 
 log = get_logger("metrics.aggregate")
 
 RAW_RETAIN_SEC = 24 * 3600
 MIN_RETAIN_SEC = 30 * 24 * 3600
+# Event tables (scheduler/application/gateway events) are not metrics but they
+# also grow without bound (the scheduler persists one row per reconcile tick,
+# every second). Retain them for a week — enough to investigate recent
+# behavior — consistent with the metrics retention model (spec 08 §6).
+EVENT_RETAIN_SEC = 7 * 24 * 3600
 
 # Metrics rolled up from raw samples (scope = "gpu" or an application id).
 GPU_METRICS = ("gpu_pct", "gpu_mem_mb", "gpu_temp_c", "gpu_power_w", "cpu_pct")
@@ -181,22 +192,38 @@ class MetricsAggregator:
                 MetricAggregate.window_sec == 60, MetricAggregate.at < min_cutoff
             ).delete()
             # Hourly (window_sec=3600) is retained indefinitely — never pruned.
+            # Event tables: retain for EVENT_RETAIN_SEC (spec 08 §6). Without
+            # this they grow without bound (scheduler persists per tick).
+            event_cutoff = now - timedelta(seconds=EVENT_RETAIN_SEC)
+            s.query(ApplicationEvent).filter(ApplicationEvent.at < event_cutoff).delete()
+            s.query(GatewayEvent).filter(GatewayEvent.at < event_cutoff).delete()
+            s.query(SchedulerEvent).filter(SchedulerEvent.at < event_cutoff).delete()
 
     # -- UI triplets (spec 08 §6) ------------------------------------------
     def summary(self) -> dict:
-        """Current / average / maximum triplets for the UI (latest windows)."""
+        """Current / average / maximum triplets for the UI (latest windows).
+
+        Only rows from the last 120 s matter (the two most recent 1-minute
+        windows); filter by time in SQL so the 30-day retention column is
+        never materialized on UI polling."""
         now = _utcnow()
         out: dict = {"gpu": {}, "applications": {}}
+        window_start = now - timedelta(seconds=120)
         with self._db() as s:
             last_min = (
                 s.query(MetricAggregate)
-                .filter(MetricAggregate.window_sec == 60, MetricAggregate.scope == "gpu")
+                .filter(
+                    MetricAggregate.window_sec == 60,
+                    MetricAggregate.scope == "gpu",
+                    MetricAggregate.at >= window_start,
+                )
                 .order_by(MetricAggregate.at.desc())
+                .limit(100)
                 .all()
             )
             for r in last_min:
                 out["gpu"].setdefault(r.metric, {})
-                if r.at >= now - timedelta(seconds=120):
+                if r.at >= window_start:
                     out["gpu"][r.metric]["average"] = r.avg
                     out["gpu"][r.metric]["maximum"] = r.max
             # current = latest raw sample
@@ -214,13 +241,18 @@ class MetricsAggregator:
             for app_id in self._app_ids:
                 app_rows = (
                     s.query(MetricAggregate)
-                    .filter(MetricAggregate.window_sec == 60, MetricAggregate.scope == app_id)
+                    .filter(
+                        MetricAggregate.window_sec == 60,
+                        MetricAggregate.scope == app_id,
+                        MetricAggregate.at >= window_start,
+                    )
                     .order_by(MetricAggregate.at.desc())
+                    .limit(100)
                     .all()
                 )
                 for r in app_rows:
                     out["applications"].setdefault(app_id, {}).setdefault(r.metric, {})
-                    if r.at >= now - timedelta(seconds=120):
+                    if r.at >= window_start:
                         out["applications"][app_id][r.metric]["average"] = r.avg
                         out["applications"][app_id][r.metric]["maximum"] = r.max
         return out

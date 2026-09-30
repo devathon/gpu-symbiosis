@@ -276,6 +276,60 @@ def test_aggregator_rollup_and_prune(tmp_path):
         assert old == 0  # pruned (24h retention)
 
 
+def test_summary_reads_only_last_two_minutes(tmp_path):
+    """summary() must not materialize the 30-day retention column: only rows
+    from the last 120 s feed the UI triplets (spec 08 §6)."""
+    engine = create_engine(str(tmp_path / "t.db"))
+    init_db(engine)
+    db = make_session_factory(engine)
+    from datetime import datetime, timedelta, timezone
+
+    from gpusybio.database.models import MetricAggregate
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db() as s:
+        # fresh row (last minute) + stale row (30 days ago, pre-dates retention)
+        s.add(MetricAggregate(scope="gpu", metric="gpu_pct", window_sec=60,
+                             min=40.0, max=60.0, avg=50.0, count=60,
+                             at=now - timedelta(seconds=30)))
+        s.add(MetricAggregate(scope="gpu", metric="gpu_pct", window_sec=60,
+                             min=1.0, max=2.0, avg=1.5, count=60,
+                             at=now - timedelta(days=20)))
+        s.add(MetricAggregate(scope="a1", metric="active_requests", window_sec=60,
+                             min=0.0, max=1.0, avg=0.5, count=60,
+                             at=now - timedelta(seconds=45)))
+
+    out = MetricsAggregator(db, ["a1"]).summary()
+    assert out["gpu"]["gpu_pct"]["average"] == 50.0  # fresh row wins
+    assert out["gpu"]["gpu_pct"]["maximum"] == 60.0
+    assert out["applications"]["a1"]["active_requests"]["average"] == 0.5
+
+
+def test_aggregator_prune_event_tables(tmp_path):
+    """Event tables are retained 7 days (spec 08 §6) — they grow unbounded
+    otherwise (scheduler persists one row per reconcile tick)."""
+    engine = create_engine(str(tmp_path / "t.db"))
+    init_db(engine)
+    db = make_session_factory(engine)
+    from datetime import datetime, timedelta, timezone
+
+    from gpusybio.database.models import ApplicationEvent, GatewayEvent, SchedulerEvent
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with db() as s:
+        s.add(ApplicationEvent(application_id="a1", event_type="T_OLD", at=now - timedelta(days=8)))
+        s.add(ApplicationEvent(application_id="a1", event_type="T_NEW", at=now - timedelta(days=1)))
+        s.add(GatewayEvent(gateway_id="gw1", event_type="G_OLD", at=now - timedelta(days=8)))
+        s.add(SchedulerEvent(trigger="t", decision="D", at=now - timedelta(days=8)))
+
+    MetricsAggregator(db, []).prune()
+    with db() as s:
+        assert s.query(ApplicationEvent).count() == 1  # only the 1-day-old row
+        assert s.query(ApplicationEvent).first().event_type == "T_NEW"
+        assert s.query(GatewayEvent).count() == 0
+        assert s.query(SchedulerEvent).count() == 0
+
+
 # -- unit: active time (spec 08 §7) ---------------------------------------------
 def test_active_time_tracking():
     from gpusybio.metrics import MetricsCollector

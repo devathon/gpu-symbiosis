@@ -56,10 +56,17 @@ class GatewayQueue:
         return len(self._queues.get(gateway_id, []))
 
     def oldest_wait_sec(self, gateway_id: str) -> float:
+        """Longest wait of any queued slot — the true oldest request.
+
+        The queue is sorted by (-priority, queued_at), so the *tail* is only
+        the oldest within its own priority group; after boost() creates mixed
+        priorities it is the *newest* slot in that group. The globally oldest
+        wait is the max over all slots (each slot's waiting_sec is independent
+        of sort order)."""
         q = self._queues.get(gateway_id)
         if not q:
             return 0.0
-        return q[-1].waiting_sec if q else 0.0  # FIFO tail = oldest
+        return max(s.waiting_sec for s in q)
 
     def slots(self, gateway_id: str) -> list[RequestSlot]:
         """Queued slots in service order (priority desc, FIFO by queued_at)."""

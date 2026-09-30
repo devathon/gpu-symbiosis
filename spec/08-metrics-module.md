@@ -177,10 +177,16 @@ short-term high-resolution metrics plus long-term aggregates:
 raw metrics            → retain 24 hours
 1-minute aggregates    → retain 30 days
 hourly aggregates      → retain indefinitely
+event tables           → retain 7 days
 ```
 
 Aggregation is done by a metrics aggregator (min/max/avg/sum per window); the
 aggregator also produces the "current / average / maximum" triplets for the UI.
+
+The event tables (`application_events`, `gateway_events`, `scheduler_events`)
+are not metrics, but they also grow without bound — the scheduler persists one
+row per reconcile tick (every second) — so the same prune pass retains them
+for **7 days** (enough to investigate recent behavior).
 
 ## 7. Application Active Time
 
