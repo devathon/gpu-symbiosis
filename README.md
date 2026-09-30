@@ -44,6 +44,12 @@ This repository holds the functional and technical specification, organised modu
 | [15-mvp-phases.md](spec/15-mvp-phases.md) | Delivery Plan | MVP phases 1–5 |
 | [16-tech-stack.md](spec/16-tech-stack.md) | Tech Stack (Locked) | Python 3.13 / FastAPI + raw-ASGI proxy / aiohttp / nvidia-ml-py / SQLite + SQLAlchemy / React + ECharts + SSE / systemd |
 
+## Documentation
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, running, testing, and code conventions
+- [Application-type plugins](docs/application-type-plugins.md) — how to add a new
+  application type (shipped module or drop-in `plugins/` file) and the `custom` type
+
 ## Fundamental Principle
 
 > **GPU applications should be treated as dynamically resident workloads rather than
@@ -61,6 +67,57 @@ scheduler**. It answers three independent questions on every evaluation:
 This handles multiple gateways pointing at one application **and** multiple
 applications coexisting within VRAM, and scales from a 24 GB GPU today to much larger
 GPUs later where several LLMs, TTS, and image models remain resident simultaneously.
+
+## Architecture
+
+Everything runs in **one process on one event loop** (spec 16 §3.1) — there is no
+multi-worker split and no separate proxy service. The control plane owns the queues,
+reservations, and the scheduler lock; the gateway layer is a raw-ASGI pipe in the same
+loop; SQLite (WAL) is the source of truth after startup.
+
+```text
+   Browser (React + ECharts, built assets served by the API)
+        │  REST /api/* (FastAPI)          │  /api/events/sse (SSE)
+        ▼                                 ▲
+   ┌─────────────────────────────────────────────────────────────┐
+   │                     Control plane (1 process)              │
+   │                                                             │
+   │   Admin API (FastAPI :9530)                                 │
+   │   Gateway ports (raw ASGI proxy, one per port) ──┐          │
+   │   Scheduler (event-driven + 1 s reconcile)       │          │
+   │   Application Manager (start/stop, load/unload)  │          │
+   │   Resource Manager (VRAM/CPU attribution)        │          │
+   │   State Manager (state machines + invariants)    │          │
+   │   Metrics Collector (1 s sampling + aggregator)  │          │
+   │   Event bus ─────────────────────────────────────┘          │
+   └──────────────────────────────┬──────────────────────────────┘
+                                  │  forward (stream / WS / SSE)
+                                  ▼
+                        ┌──────────────────────┐
+                        │   GPU applications   │  (llama, Ollama,
+                        │  upstream ports      │   ComfyUI, TTS, …)
+                        └──────────────────────┘
+                                  ▲
+              NVML (nvidia-ml-py)  │  psutil (process tree)
+                                  │
+                          ┌───────┴────────┐
+                          │ GPU + CPU      │
+                          └────────────────┘
+   Persistence: SQLite (WAL) — config, requests, events, metrics  (spec 09)
+```
+
+The key boundaries (spec 02) and where each lives in code:
+
+| Component | Responsibility | Code |
+| --- | --- | --- |
+| **Gateway / proxy** | Listen on gateway ports; accept, queue, forward, stream, cancel | `gpusybio/gateway/` |
+| **Scheduler** | Decide what to serve, what to load, what to evict | `gpusybio/scheduler/` |
+| **Application Manager** | Start/stop, load/unload, process + timing measurement | `gpusybio/applications/` |
+| **Resource Manager** | VRAM/CPU/temperature, per-app attribution, reservations | `gpusybio/resources/` |
+| **State Manager** | Application/gateway/request state machines + invariants | `gpusybio/state/` |
+| **Metrics Collector** | 1 s sampling, EWMA demand, latency percentiles, retention | `gpusybio/metrics/` |
+| **Admin API** | Configuration + monitoring + SSE | `gpusybio/api/` |
+| **Event bus** | Decoupled lifecycle/scheduler events + SSE fan-out | `gpusybio/events/` |
 
 ## Implementation — Phase 1 (done)
 
