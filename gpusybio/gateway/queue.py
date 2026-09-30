@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 
@@ -20,24 +21,35 @@ class RequestSlot:
         return time.time() - self.queued_at
 
 
+_ORDER = lambda s: (-s.priority, s.queued_at)  # noqa: E731
+
+
 class GatewayQueue:
-    """One queue per gateway; ordering = (priority desc, FIFO by queued_at)."""
+    """One queue per gateway; ordering = (priority desc, FIFO by queued_at).
+
+    Per-gateway storage is a ``deque`` so the hot ``pop`` (serve oldest /
+    highest-priority) is O(1) via ``popleft``; the re-sort on enqueue/boost is
+    O(n log n) but the queue is bounded by ``max_waiting_queue`` (default 20).
+    """
 
     def __init__(self) -> None:
-        self._queues: dict[str, list[RequestSlot]] = {}
+        self._queues: dict[str, deque[RequestSlot]] = {}
         self._by_id: dict[str, RequestSlot] = {}
 
+    def _resort(self, gateway_id: str) -> None:
+        self._queues[gateway_id] = deque(sorted(self._queues[gateway_id], key=_ORDER))
+
     def enqueue(self, slot: RequestSlot) -> None:
-        q = self._queues.setdefault(slot.gateway_id, [])
+        q = self._queues.setdefault(slot.gateway_id, deque())
         q.append(slot)
-        q.sort(key=lambda s: (-s.priority, s.queued_at))
+        self._resort(slot.gateway_id)
         self._by_id[slot.request_id] = slot
 
     def pop(self, gateway_id: str) -> RequestSlot | None:
         q = self._queues.get(gateway_id)
         if not q:
             return None
-        slot = q.pop(0)
+        slot = q.popleft()
         self._by_id.pop(slot.request_id, None)
         return slot
 
@@ -78,9 +90,10 @@ class GatewayQueue:
         slot = self._by_id.get(request_id)
         if slot is None:
             return None
-        q = self._queues.get(slot.gateway_id, [])
-        slot.priority = max([s.priority for s in q], default=slot.priority) + 1
-        q.sort(key=lambda s: (-s.priority, s.queued_at))
+        q = self._queues.get(slot.gateway_id)
+        if q:
+            slot.priority = max(s.priority for s in q) + 1
+        self._resort(slot.gateway_id)
         return slot
 
     def clear(self, gateway_id: str) -> list[RequestSlot]:

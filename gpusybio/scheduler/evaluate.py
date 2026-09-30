@@ -377,9 +377,33 @@ class EvaluateMixin:
             await self._emit("SWITCH_IN", application_id=app_id, trigger=trigger)
         return ok
 
-    def _vram_accounting(self) -> dict:
-        """spec 11 §5: total/reserve/resident/reserved/external/free."""
-        s = self._resources.last_sample or self._resources.sample()
+    def _vram_accounting(self, allow_sample: bool = True) -> dict:
+        """spec 11 §5: total/reserve/resident/reserved/external/free.
+
+        ``allow_sample`` controls whether a missing cached sample triggers a fresh
+        (potentially blocking NVML) ``sample()``. The API current-decision endpoint
+        calls it with the default (True); ``_decide`` calls it under the scheduler
+        lock with ``allow_sample=False`` so the event loop is never blocked by NVML
+        (``observed_mb``/``reservations`` read cached state only).
+        """
+        s = self._resources.last_sample
+        if s is None:
+            if not allow_sample:
+                # No cached sample and we must not block: report a degraded
+                # zeroed accounting rather than triggering NVML under the lock.
+                return {
+                    "total_mb": 0.0,
+                    "reserve_mb": round(float(self._settings.gpu.memory_reserve_mb), 1),
+                    "usable_mb": 0.0,
+                    "resident_mb": round(sum(self._resources.observed_mb(a) for a in self._app_ids), 1),
+                    "reserved_mb": round(
+                        sum(r.required_mb for r in self._resources.reservations().values()), 1
+                    ),
+                    "external_mb": 0.0,
+                    "free_mb": 0.0,
+                    "stale": True,
+                }
+            s = self._resources.sample()
         total = s.total_mb
         reserve = float(self._settings.gpu.memory_reserve_mb)
         usable = max(0.0, total - reserve)
@@ -435,7 +459,7 @@ class EvaluateMixin:
         if guards is not None:
             rec["guards"] = guards
         rec["residents"] = self.residents()
-        rec["vram"] = self._vram_accounting()
+        rec["vram"] = self._vram_accounting(allow_sample=False)
         rec["switch_tracking"] = self.switch_tracking()
         rec["boosts"] = self.boosts()
         if self._dry_run:

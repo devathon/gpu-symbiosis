@@ -73,8 +73,10 @@ model load/unload).
 All scripts run with a controlled environment (see [12-security.md](12-security.md)):
 
 - configured working directory
-- configured environment variables (including `GPUSYB_APP_ID`, `GPUSYB_PORT`,
-  `GPUSYB_PID`, `GPUSYB_DATA_PATH`, `GPUSYB_LOG`, `GPUSYB_PID_FILE`)
+- the **inherited service environment** (start scripts need `PATH`, `HOME`, …)
+  with the injected `GPUSYB_*` variables — `GPUSYB_APP_ID`, `GPUSYB_PORT`,
+  `GPUSYB_PID`, `GPUSYB_DATA_PATH`, `GPUSYB_LOG`, `GPUSYB_PID_FILE` — and any
+  configured extra env layered on top
 - the application's **log path** (`GPUSYB_LOG`) and **pid path**
   (`GPUSYB_PID_FILE`) — the effective paths (below). The start script's stdout
   and stderr are directed to `GPUSYB_LOG`, so the application's output is the log

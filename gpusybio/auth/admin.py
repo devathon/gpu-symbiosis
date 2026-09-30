@@ -25,6 +25,17 @@ from gpusybio.database.models import AdminUser
 _SESSIONS: dict[str, dict] = {}
 
 SESSION_TTL_SEC = 12 * 3600  # 12 h
+# Bound the store so a churn of logins (or a client minting sessions) can't grow
+# it without limit: when full, the oldest session is evicted on the next issue.
+_MAX_SESSIONS = 64
+
+
+def _make_room() -> None:
+    """Evict the oldest sessions (by created time) until there is room for one
+    more. Called from create_session so the store stays bounded."""
+    while len(_SESSIONS) >= _MAX_SESSIONS:
+        oldest = min(_SESSIONS, key=lambda t: _SESSIONS[t]["created"])
+        _SESSIONS.pop(oldest, None)
 
 
 def _new_token() -> str:
@@ -105,6 +116,7 @@ def create_session(username: str) -> tuple[str, str]:
     """Issue a session token + CSRF token. Returns (session_token, csrf_token)."""
     token = _new_token()
     csrf = _new_token()
+    _make_room()
     _SESSIONS[token] = {"username": username, "csrf": csrf, "created": time.time()}
     return token, csrf
 

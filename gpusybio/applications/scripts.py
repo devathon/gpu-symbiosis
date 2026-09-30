@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import time
 from dataclasses import dataclass
 
@@ -128,8 +129,9 @@ def _pid_file_is_fresh(path: str, t_start: float) -> bool:
     filesystem mtime.
     """
     try:
-        if not open(path, "r", encoding="utf-8").read().strip():
-            return False
+        with open(path, "r", encoding="utf-8") as f:
+            if not f.read().strip():
+                return False
         return os.path.getmtime(path) >= t_start - 1.0
     except OSError:
         return False
@@ -239,10 +241,8 @@ async def run_start_script(
 async def graceful_stop(pid: int, timeout: float = 10.0) -> ScriptResult:
     """SIGTERM → wait → SIGKILL (spec 03 §2.2 default stop)."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "kill", str(pid), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-        )
-        await proc.wait()
+        # Signal the process directly — no external ``kill`` binary to spawn.
+        os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         return ScriptResult(0, "", "process already gone", False)
     except OSError as e:

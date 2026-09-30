@@ -54,15 +54,23 @@ def delete_key(db: SessionFactory, gateway_id: str, key_id: str) -> bool:
 
 def verify_key(db: SessionFactory, gateway_id: str, presented: str | None) -> bool:
     """True if the gateway allows the request: no keys configured (auth
-    optional), or the presented key matches a stored hash."""
+    optional), or the presented key matches a stored hash.
+
+    The check is a hash-equality lookup (``key_hash`` is indexed) rather than
+    loading every key row and comparing in Python — O(1) in the key count."""
     with db() as s:
-        rows = s.query(GatewayApiKey).filter_by(gateway_id=gateway_id).all()
-    if not rows:
-        return True  # auth not configured for this gateway → allow all
+        if s.query(GatewayApiKey).filter_by(gateway_id=gateway_id).first() is None:
+            return True  # auth not configured for this gateway → allow all
     if not presented:
         return False
     presented_hash = _hash(presented)
-    return any(r.key_hash == presented_hash for r in rows)
+    with db() as s:
+        return (
+            s.query(GatewayApiKey)
+            .filter_by(gateway_id=gateway_id, key_hash=presented_hash)
+            .first()
+            is not None
+        )
 
 
 def key_configured(db: SessionFactory, gateway_id: str) -> bool:

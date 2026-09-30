@@ -88,6 +88,28 @@ async def test_admin_auth_flow(server):
     await c.aclose()
 
 
+def test_session_store_is_bounded():
+    """The in-memory session store is bounded (spec 12 §3): issuing more than
+    _MAX_SESSIONS sessions evicts the oldest rather than growing without limit."""
+    import gpusybio.auth.admin as admin_mod
+    from gpusybio.auth.admin import create_session, validate_session
+
+    saved = dict(admin_mod._SESSIONS)
+    admin_mod._SESSIONS.clear()
+    try:
+        cap = admin_mod._MAX_SESSIONS
+        # create_session returns (token, csrf) — keep the token.
+        tokens = [token for token, _ in (create_session(f"user{i}") for i in range(cap + 5))]
+        # The store never exceeds the cap.
+        assert len(admin_mod._SESSIONS) == cap
+        # The oldest issued session was evicted; the newest is valid.
+        assert validate_session(tokens[0]) is None
+        assert validate_session(tokens[-1]) is not None
+    finally:
+        admin_mod._SESSIONS.clear()
+        admin_mod._SESSIONS.update(saved)
+
+
 async def test_admin_password_hashed(server):
     """The stored password is salted + hashed (scrypt), never plaintext."""
     c = httpx.AsyncClient()

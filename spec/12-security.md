@@ -62,6 +62,12 @@ stdout/stderr capture
 exit code
 ```
 
+The script inherits the **service (orchestrator) environment** — start scripts
+rely on `PATH`, `HOME`, `LD_LIBRARY_PATH`, etc. to find the application binary —
+with the `GPUSYB_*` variables and any configured extra env layered on top.
+"Controlled" refers to the working directory, timeout, output capture, exit code,
+and the executing user — not to a sanitized environment.
+
 Additional requirements:
 
 - scripts run as a configured user (default: the service user, not root)

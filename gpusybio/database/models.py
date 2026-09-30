@@ -133,7 +133,8 @@ class GatewayApiKey(Base):
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     gateway_id: Mapped[str] = mapped_column(Text, ForeignKey("gateways.id"), nullable=False)
     name: Mapped[str | None] = mapped_column(Text)
-    key_hash: Mapped[str] = mapped_column(Text, nullable=False)  # sha256 hex
+    # Indexed: verify_key() looks a presented key up by its sha256 hash.
+    key_hash: Mapped[str] = mapped_column(Text, nullable=False, index=True)  # sha256 hex
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
