@@ -1,17 +1,20 @@
-"""Memory-based residency monitor (spec 06 §10).
+"""Memory-based residency monitor (spec 06 §10.2).
 
 Some applications (e.g. ComfyUI) load and free their model *outside*
 GPUSymbiosis — directly, via their own API. This monitor watches each app's
 per-process GPU memory and reconciles the residency state:
 
-- ``LOADED`` while VRAM < ``memory_unload_threshold_pct`` (default 20% of the
-  configured memory) → the model was freed externally → mark **UNLOADED**.
-- ``OFF`` while VRAM >= ``memory_load_threshold_pct`` (default 80% of the
-  configured memory) → the model was loaded externally → mark **LOADED**.
+- ``OFF`` while VRAM >= ``loaded_gpu_memory_mb`` (the app's absolute MB
+  threshold) → the model was loaded externally → mark **LOADED**.
+- ``LOADED`` while VRAM < the threshold → the model was freed externally →
+  mark **UNLOADED**.
 
-The wide hysteresis band (80% / 20%) prevents flapping near a single threshold.
-Only apps that support load/unload (``supports_load_unload``) are tracked — an
-app without a model to load/unload has nothing to reconcile.
+The threshold is a per-app absolute MB value; ``0`` (the default) disables
+auto-detection for that app. A single threshold has no hysteresis band, so
+the flip debounce (``min_flip_sec``) is the only flapping protection.
+
+Works for any app with a ``load``/``unload``-capable state, including
+unload-only apps (no load script): they load automatically from usage.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ class ResidencyMonitor:
         self._app_ids = list(app_ids)
         self._db = db
         self._interval = interval
-        # Debounce (a safety net on top of the hysteresis band).
+        # Debounce — the sole flapping protection for a single threshold.
         self._min_flip = min_flip_sec
         self._last_flip: dict[str, float] = {}
         self._task: asyncio.Task | None = None
@@ -87,34 +90,30 @@ class ResidencyMonitor:
                 cfg = self._apps.config(app_id)
             except Exception:
                 continue
-            if not cfg.supports_load_unload:
-                continue  # no model to load/unload
+            threshold = float(cfg.loaded_gpu_memory_mb or 0.0)
+            if threshold <= 0:
+                continue  # auto-detection disabled for this app
             if now - self._last_flip.get(app_id, 0.0) < self._min_flip:
                 continue  # debounce
-            configured = cfg.configured_gpu_memory_mb
-            if configured <= 0:
-                continue
             try:
                 mem = float(self._resources.backend.process_memory_mb(s.pid) or 0.0)
             except Exception:
                 continue
-            loaded_mb = configured * cfg.memory_load_threshold_pct / 100.0
-            unloaded_mb = configured * cfg.memory_unload_threshold_pct / 100.0
-            if s.residency is ResidencyState.LOADED and mem < unloaded_mb:
+            if s.residency is ResidencyState.LOADED and mem < threshold:
                 self._states.set_residency(app_id, ResidencyState.OFF)
                 self._last_flip[app_id] = now
                 log.info("memory-monitored unload", app_id=app_id,
-                         mem_mb=round(mem, 1), below_mb=round(unloaded_mb, 1))
+                         mem_mb=round(mem, 1), below_mb=threshold)
                 await self._emit("UNLOADED", app_id,
-                                detail=f"VRAM {mem:.0f} MB < {unloaded_mb:.0f} MB")
+                                detail=f"VRAM {mem:.0f} MB < {threshold:.0f} MB")
                 changes.append(app_id)
-            elif s.residency is ResidencyState.OFF and mem >= loaded_mb:
+            elif s.residency is ResidencyState.OFF and mem >= threshold:
                 self._states.set_residency(app_id, ResidencyState.LOADED)
                 self._last_flip[app_id] = now
                 log.info("memory-monitored load", app_id=app_id,
-                         mem_mb=round(mem, 1), at_least_mb=round(loaded_mb, 1))
+                         mem_mb=round(mem, 1), at_least_mb=threshold)
                 await self._emit("LOAD_READY", app_id,
-                                detail=f"VRAM {mem:.0f} MB >= {loaded_mb:.0f} MB")
+                                detail=f"VRAM {mem:.0f} MB >= {threshold:.0f} MB")
                 changes.append(app_id)
         return changes
 

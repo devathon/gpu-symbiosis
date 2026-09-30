@@ -85,6 +85,10 @@ class RequestManager:
     def bus(self):
         return self._bus
 
+    def settings(self):
+        """Settings object (e.g. ``settings.requests.default_request_timeout_sec``)."""
+        return self._settings
+
     def queue(self) -> GatewayQueue:
         return self._queue
 
@@ -245,10 +249,10 @@ class RequestManager:
         app_id = slot.application_id if slot else ""
         await self._finish(request_id, "CANCELLED", app_id, "client disconnected")
 
-    async def expire(self, request_id: str) -> None:
+    async def expire(self, request_id: str, detail: str = "wait timeout") -> None:
         slot = self._queue.remove(request_id)
         app_id = slot.application_id if slot else ""
-        await self._finish(request_id, "EXPIRED", app_id, "wait timeout")
+        await self._finish(request_id, "EXPIRED", app_id, detail)
 
     # -- housekeeping ---------------------------------------------------------------
     def active_count(self, app_id: str) -> int:

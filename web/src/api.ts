@@ -43,6 +43,7 @@ export interface AppView {
   idle_unload_timeout_sec: number | null;
   activity_detection_method: string;
   idle_threshold_gpu_pct: number;
+  loaded_gpu_memory_mb: number;
 }
 
 export interface GwView {
@@ -266,6 +267,7 @@ export interface AppFormFields {
   idle_unload_timeout_sec: number | null;
   activity_detection_method: string;
   idle_threshold_gpu_pct: number;
+  loaded_gpu_memory_mb: number;
 }
 
 // -- gateway form (spec 11 §3) --------------------------------------------------

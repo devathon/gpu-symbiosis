@@ -1,8 +1,10 @@
 """Memory-based residency monitor (spec 06 §10.2).
 
 The monitor reconciles LOADED/UNLOADED when the app loads/frees its model
-outside GPUSymbiosis (e.g. ComfyUI): LOADED + VRAM < unload threshold →
-UNLOADED; OFF + VRAM >= load threshold → LOADED.
+outside GPUSymbiosis (e.g. ComfyUI): OFF + VRAM >= loaded_gpu_memory_mb →
+LOADED; LOADED + VRAM < threshold → UNLOADED. Threshold 0 (default) =
+auto-detection disabled. A single threshold has no hysteresis band; the flip
+debounce is the only flapping protection.
 """
 
 from __future__ import annotations
@@ -15,12 +17,8 @@ from gpusybio.state import StateManager
 
 
 class StubApp:
-    def __init__(self, supports_load_unload=True, configured=12288.0,
-                 load_pct=80.0, unload_pct=20.0):
-        self.supports_load_unload = supports_load_unload
-        self.configured_gpu_memory_mb = configured
-        self.memory_load_threshold_pct = load_pct
-        self.memory_unload_threshold_pct = unload_pct
+    def __init__(self, loaded_gpu_memory_mb=0.0):
+        self.loaded_gpu_memory_mb = loaded_gpu_memory_mb
 
 
 class StubApps:
@@ -53,9 +51,8 @@ class StubBus:
         self.events.append((event_type, data))
 
 
-def _make(states, app_id, bus, app_ids, supports=True, configured=12288.0):
-    apps = StubApps({app_id: StubApp(supports_load_unload=supports,
-                                     configured=configured)})
+def _make(states, app_id, bus, app_ids, threshold_mb=0.0):
+    apps = StubApps({app_id: StubApp(loaded_gpu_memory_mb=threshold_mb)})
     res = StubResources()
     mon = ResidencyMonitor(
         res, states, apps, bus, app_ids, min_flip_sec=0.0,
@@ -69,8 +66,8 @@ async def test_loaded_vram_low_marks_unloaded():
     states.set_residency("c1", ResidencyState.LOADED)
     states.get("c1").pid = 123
     bus = StubBus()
-    mon, apps, res = _make(states, "c1", bus, ["c1"], configured=12288.0)
-    # configured 12288 MB; unload threshold 20% = 2457.6 MB. VRAM 1000 MB < 2457.
+    mon, apps, res = _make(states, "c1", bus, ["c1"], threshold_mb=9000.0)
+    # VRAM 1000 MB < 9000 MB threshold → UNLOADED.
     res.mem_mb = 1000.0
     changed = await mon.tick()
     assert changed == ["c1"]
@@ -84,8 +81,8 @@ async def test_off_vram_high_marks_loaded():
     states.set_residency("c1", ResidencyState.OFF)
     states.get("c1").pid = 123
     bus = StubBus()
-    mon, apps, res = _make(states, "c1", bus, ["c1"], configured=12288.0)
-    # load threshold 80% of 12288 = 9830.4 MB. VRAM 10000 MB >= 9830.4.
+    mon, apps, res = _make(states, "c1", bus, ["c1"], threshold_mb=9000.0)
+    # VRAM 10000 MB >= 9000 MB threshold → LOADED.
     res.mem_mb = 10000.0
     changed = await mon.tick()
     assert changed == ["c1"]
@@ -93,33 +90,61 @@ async def test_off_vram_high_marks_loaded():
     assert bus.events[0][0] == "LOAD_READY"
 
 
-async def test_in_band_no_change():
-    """VRAM between the thresholds → no state change (hysteresis band)."""
-    states = StateManager()
-    states.set_process("c1", ProcessState.RUNNING)
-    states.set_residency("c1", ResidencyState.LOADED)
-    states.get("c1").pid = 123
-    bus = StubBus()
-    mon, apps, res = _make(states, "c1", bus, ["c1"], configured=12288.0)
-    # 2457.6 MB < VRAM 5000 MB < 9830.4 MB → in band, LOADED stays.
-    res.mem_mb = 5000.0
-    changed = await mon.tick()
-    assert changed == []
-    assert states.get("c1").residency is ResidencyState.LOADED
-
-
-async def test_no_load_unload_skipped():
-    """Apps without load/unload have nothing to reconcile."""
+async def test_off_vram_at_threshold_marks_loaded():
+    """The boundary is inclusive: VRAM exactly at the threshold is loaded."""
     states = StateManager()
     states.set_process("c1", ProcessState.RUNNING)
     states.set_residency("c1", ResidencyState.OFF)
     states.get("c1").pid = 123
     bus = StubBus()
-    mon, apps, res = _make(states, "c1", bus, ["c1"], supports=False)
+    mon, apps, res = _make(states, "c1", bus, ["c1"], threshold_mb=9000.0)
+    res.mem_mb = 9000.0
+    changed = await mon.tick()
+    assert changed == ["c1"]
+    assert states.get("c1").residency is ResidencyState.LOADED
+
+
+async def test_loaded_vram_at_threshold_stays():
+    """And LOADED at exactly the threshold stays loaded (< is strict)."""
+    states = StateManager()
+    states.set_process("c1", ProcessState.RUNNING)
+    states.set_residency("c1", ResidencyState.LOADED)
+    states.get("c1").pid = 123
+    bus = StubBus()
+    mon, apps, res = _make(states, "c1", bus, ["c1"], threshold_mb=9000.0)
+    res.mem_mb = 9000.0
+    changed = await mon.tick()
+    assert changed == []
+    assert states.get("c1").residency is ResidencyState.LOADED
+
+
+async def test_threshold_zero_skipped():
+    """threshold 0 (the default) disables auto-detection for the app."""
+    states = StateManager()
+    states.set_process("c1", ProcessState.RUNNING)
+    states.set_residency("c1", ResidencyState.OFF)
+    states.get("c1").pid = 123
+    bus = StubBus()
+    mon, apps, res = _make(states, "c1", bus, ["c1"])  # threshold 0
     res.mem_mb = 10000.0
     changed = await mon.tick()
     assert changed == []
     assert states.get("c1").residency is ResidencyState.OFF
+
+
+async def test_unload_only_app_tracked():
+    """The monitor no longer gates on load/unload support: an unload-only
+    app (no load script) loads automatically from usage."""
+    states = StateManager()
+    states.set_process("c1", ProcessState.RUNNING)
+    states.set_residency("c1", ResidencyState.OFF)
+    states.get("c1").pid = 123
+    bus = StubBus()
+    mon, apps, res = _make(states, "c1", bus, ["c1"], threshold_mb=9000.0)
+    res.mem_mb = 10000.0
+    changed = await mon.tick()
+    assert changed == ["c1"]
+    assert states.get("c1").residency is ResidencyState.LOADED
 
 
 async def test_stopped_skipped():

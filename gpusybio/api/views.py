@@ -85,8 +85,7 @@ def _app_view(row: Application, state, resources) -> dict:
         "idle_unload_timeout_sec": row.idle_unload_timeout_sec,
         "activity_detection_method": row.activity_detection_method,
         "idle_threshold_gpu_pct": row.idle_threshold_gpu_pct,
-        "memory_load_threshold_pct": row.memory_load_threshold_pct,
-        "memory_unload_threshold_pct": row.memory_unload_threshold_pct,
+        "loaded_gpu_memory_mb": row.loaded_gpu_memory_mb,
         # The ``custom`` type's declared metrics (spec 08 §9.6) — the edit view
         # pre-fills its fields from this; None for types without declared metrics.
         "metrics": _app_metrics(row),

@@ -102,8 +102,8 @@ A1 becomes candidate   →   and can be loaded again
 ```
 
 A1's queued requests remain queued through the whole episode (Invariant 5); their
-clients keep waiting (subject to gateway `max_waiting_time` policy and
-`request_timeout`).
+clients keep waiting (subject to gateway `max_waiting_time_sec` policy and
+`request_timeout_sec`).
 
 ## 3. Load Failure Protection
 

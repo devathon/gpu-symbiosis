@@ -28,11 +28,12 @@ export default function AppCards({
                 <span className="font-medium">{a.name}</span>
                 {/* Combined state (spec 04 §3): RUNNING (busy) is one badge;
                     idle-but-loaded renders as TWO badges (IDLE + LOADED), both
-                    orange; everything else (IDLE, STOPPED, STARTING, ...) is one. */}
+                    light amber (#FEF3C7) with dark text; everything else
+                    (IDLE, STOPPED, STARTING, ...) is one. */}
                 {a.state === "IDLE & LOADED" ? (
                   <>
-                    <span className="rounded bg-orange-900/60 px-1.5 py-0.5 text-xs text-orange-300">IDLE</span>
-                    <span className="rounded bg-orange-900/60 px-1.5 py-0.5 text-xs text-orange-300">LOADED</span>
+                    <span className="rounded bg-[#FEF3C7] px-1.5 py-0.5 text-xs text-zinc-900">IDLE</span>
+                    <span className="rounded bg-[#FEF3C7] px-1.5 py-0.5 text-xs text-zinc-900">LOADED</span>
                   </>
                 ) : (
                   badge(a.state)
@@ -51,14 +52,16 @@ export default function AppCards({
             <div className="flex flex-wrap gap-1.5">
               {a.process_state === "RUNNING" ? (
                 <>
-                  {/* Unloadable app (has an unload script): Load when not
-                      loaded, Unload when loaded — and Stop is ALWAYS available
-                      (the direct-kill path). A non-unloadable app just offers
-                      Stop. Force Stop (immediate kill) is always shown. */}
-                  {a.supports_load_unload && a.residency_state !== "LOADED" && (
+                  {/* Load button only when the app HAS a load script; an
+                      unload-only app loads automatically from usage (the
+                      residency monitor) and offers no manual Load. Unload is
+                      shown when loaded and the app has an unload script.
+                      Stop is ALWAYS available (the direct-kill path).
+                      Force Stop (immediate kill) is always shown. */}
+                  {a.load_script && a.residency_state !== "LOADED" && (
                     <Btn label="Load" onClick={() => act(() => api.appLoad(a.id))} />
                   )}
-                  {a.supports_load_unload && a.residency_state === "LOADED" && (
+                  {a.unload_script && a.residency_state === "LOADED" && (
                     <Btn label="Unload" onClick={() => act(() => api.appUnload(a.id))} />
                   )}
                   <Btn label="Stop" onClick={() => act(() => api.appStop(a.id))} />

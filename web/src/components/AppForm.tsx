@@ -28,6 +28,7 @@ const EMPTY: AppFormFields = {
   idle_unload_timeout_sec: null,
   activity_detection_method: "gpu_usage",
   idle_threshold_gpu_pct: 5,
+  loaded_gpu_memory_mb: 0,
 };
 
 const fromView = (v: AppView): AppFormFields => ({
@@ -54,6 +55,7 @@ const fromView = (v: AppView): AppFormFields => ({
   idle_unload_timeout_sec: v.idle_unload_timeout_sec ?? null,
   activity_detection_method: v.activity_detection_method ?? "gpu_usage",
   idle_threshold_gpu_pct: v.idle_threshold_gpu_pct ?? 5,
+  loaded_gpu_memory_mb: v.loaded_gpu_memory_mb ?? 0,
 });
 
 export default function AppForm({
@@ -102,6 +104,7 @@ export default function AppForm({
       ready_check_url: f.ready_check_url || null,
       cpu_memory_required_mb: num(f.cpu_memory_required_mb ? String(f.cpu_memory_required_mb) : ""),
       idle_unload_timeout_sec: num(f.idle_unload_timeout_sec ? String(f.idle_unload_timeout_sec) : ""),
+      loaded_gpu_memory_mb: Math.max(0, Number(f.loaded_gpu_memory_mb) || 0),
     };
     if (editing) {
       act(() => api.appUpdate(editing.id, fields));
@@ -253,6 +256,20 @@ export default function AppForm({
               value={f.configured_gpu_memory_mb || ""}
               onChange={(e) => set("configured_gpu_memory_mb", Number(e.target.value))}
             />
+          </Row>
+          <Row label="Loaded GPU memory (MB)">
+            <div className="min-w-0">
+              <input
+                className={inp}
+                type="number"
+                min="0"
+                value={f.loaded_gpu_memory_mb ?? ""}
+                onChange={(e) => set("loaded_gpu_memory_mb", e.target.value === "" ? 0 : Number(e.target.value))}
+              />
+              <p className="mt-0.5 text-[11px] text-zinc-600">
+                Mark LOADED/UNLOADED automatically when per-process VRAM crosses this level; 0 = disabled.
+              </p>
+            </div>
           </Row>
           <Row label="CPU memory (MB)">
             <input

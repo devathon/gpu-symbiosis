@@ -396,12 +396,15 @@ GPUSymbiosis. A background monitor watches each app's per-process GPU memory and
 reconciles the residency state (spec 04 §3 — LOADED is based on VRAM):
 
 ```text
-LOADED  and VRAM < memory_unload_threshold (default 20% of configured)  → UNLOADED
-OFF     and VRAM >= memory_load_threshold (default 80% of configured)   → LOADED
+OFF     and VRAM >= loaded_gpu_memory_mb (per-app threshold, MB)  → LOADED
+LOADED  and VRAM <  loaded_gpu_memory_mb                          → UNLOADED
 ```
 
-The wide hysteresis band (80% / 20%) prevents flapping near a single threshold.
-Only apps that support load/unload are tracked. The monitor publishes the state
+`loaded_gpu_memory_mb` is a per-app absolute MB level (default 0 = auto-detection
+disabled). A single threshold has no hysteresis band, so the flip debounce
+(`min_flip_sec`, default 10s) is the only flapping protection. Any app with a
+residency state is tracked — including unload-only apps (no load script), which
+load automatically from usage. The monitor publishes the state
 change (UNLOADED / LOAD_READY) so the scheduler and UI react.
 
 ## 11. Switching Cost

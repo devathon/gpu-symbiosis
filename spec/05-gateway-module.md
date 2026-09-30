@@ -15,10 +15,12 @@ application_id           string, target application
 priority                 int, scheduling priority (see §3)
 
 max_waiting_queue        int, max queued requests
-max_waiting_time         seconds, max time a request may wait
+max_waiting_time_sec     int, max time a request may wait (default 300)
 
 enabled                  bool
-request_timeout          seconds, max time from received to completed
+request_timeout_sec      seconds, absolute cap from received to completed
+                        (default: settings default, 600s) — no wait-timeout
+                        policy may extend a request past it
 
 max_concurrent_requests  int, forwarded concurrently (default 1)
 ```
@@ -86,7 +88,7 @@ A queue item is therefore ordered by `(effective_request_priority, queued_at)`.
   waiting_time = now - queued_at
   ```
 
-  If `waiting_time > gateway.max_waiting_time`, the request is handled per
+  If `waiting_time > gateway.max_waiting_time_sec`, the request is handled per
   configured policy:
 
   ```text

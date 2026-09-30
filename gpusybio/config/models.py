@@ -73,10 +73,10 @@ class ApplicationSpec(BaseModel):
     idle_unload_timeout_sec: int | None = None
     activity_detection_method: str = "gpu_usage"
     idle_threshold_gpu_pct: float = 5.0
-    # Memory-based residency monitor (spec 06 §10.2): LOADED while VRAM >= load
-    # threshold, UNLOADED while < unload threshold (hysteresis).
-    memory_load_threshold_pct: float = Field(default=80.0, ge=0, le=100)
-    memory_unload_threshold_pct: float = Field(default=20.0, ge=0, le=100)
+    # Memory-based residency monitor (spec 06 §10.2): the app is marked
+    # LOADED while its VRAM >= this absolute MB threshold and UNLOADED while
+    # below it. 0 (default) disables auto-detection for this app.
+    loaded_gpu_memory_mb: float = Field(default=0.0, ge=0)
     pinned: bool = False
 
     api_enabled: bool = True

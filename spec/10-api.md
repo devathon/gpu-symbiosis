@@ -265,7 +265,7 @@ gateways:
     application: qwen38
     priority: 10
     max_waiting_queue: 10
-    max_waiting_time: 120
+    max_waiting_time_sec: 120
     enabled: true
 
   - name: Qwen 3.5 API
@@ -273,7 +273,7 @@ gateways:
     application: qwen35
     priority: 8
     max_waiting_queue: 10
-    max_waiting_time: 120
+    max_waiting_time_sec: 120
     enabled: true
 
   - name: TTS API
@@ -281,7 +281,7 @@ gateways:
     application: breeze
     priority: 7
     max_waiting_queue: 20
-    max_waiting_time: 60
+    max_waiting_time_sec: 60
     enabled: true
 ```
 

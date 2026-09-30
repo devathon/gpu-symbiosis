@@ -245,7 +245,8 @@ def make_gateway_proxy(
                 await request_manager.complete(request_id, error=None if status < 500 else f"upstream {status}")
             else:
                 tokens = _token_headers(resp)  # per-request token counts (spec 08 §9.2)
-                await _stream(send, resp, receive, request_id, status, tokens)
+                await _stream(send, resp, receive, request_id, status, tokens,
+                             timeout=_stream_budget(slot))
         except (asyncio.CancelledError,):
             raise
         except Exception as e:  # noqa: BLE001 - upstream unreachable etc.
@@ -256,9 +257,11 @@ def make_gateway_proxy(
                 pass
             await request_manager.complete(request_id, error=str(e)[:200])
 
-    async def _stream(send, resp, receive, request_id: str, status: int,
-                     tokens: tuple[int | None, int | None] | None = None):
-        """Pump the upstream body to the client, racing client disconnect."""
+    async def _stream(send, resp, receive, request_id: str | None, status: int,
+                     tokens: tuple[int | None, int | None] | None = None,
+                     timeout: float | None = None):
+        """Pump the upstream body to the client, racing client disconnect and
+        (when ``timeout`` is set) the received→completed cap (spec 10)."""
         in_tok, out_tok = (tokens or (None, None))
         stream = resp.content
 
@@ -277,10 +280,37 @@ def make_gateway_proxy(
 
         stream_task = asyncio.create_task(pump())
         disconnect_task = asyncio.create_task(watch_disconnect())
-        done, _pending = await asyncio.wait(
-            {stream_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED
-        )
+        if timeout is not None and timeout > 0:
+            # Received→completed cap (spec 10) applies to the stream phase too.
+            done, _pending = await asyncio.wait(
+                {stream_task, disconnect_task}, timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        else:
+            done, _pending = await asyncio.wait(
+                {stream_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED
+            )
         try:
+            if not done:
+                # Cap elapsed mid-stream: the response headers are already sent,
+                # so the status cannot change here — abort the upstream, end the
+                # stream with a note, and mark the request failed.
+                stream_task.cancel()
+                disconnect_task.cancel()
+                try:
+                    await stream_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+                if request_id is not None:
+                    await request_manager.complete(request_id, error="request timeout")
+                try:
+                    await send(
+                        {"type": "http.response.body", "body": b"\n[request timeout]\n", "more_body": True}
+                    )
+                    await send({"type": "http.response.body", "body": b""})
+                except Exception:  # noqa: BLE001
+                    pass
+                return
             if stream_task not in done:
                 # Client went away first: abort the upstream (spike pattern).
                 stream_task.cancel()
@@ -376,12 +406,34 @@ def make_gateway_proxy(
                 pass
             raise
 
+    def _request_timeout(gw: dict) -> float:
+        """Received→completed cap (spec 10): per-gateway request_timeout_sec,
+        falling back to the global default (600s)."""
+        rt = gw.get("request_timeout_sec")
+        if rt is not None:
+            return float(rt)
+        try:
+            return float(request_manager.settings().requests.default_request_timeout_sec)
+        except Exception:  # noqa: BLE001
+            return 600.0
+
+    def _stream_budget(slot) -> float | None:
+        """Seconds left until the received→completed cap; None = uncapped
+        (direct-forward pass-through has no intake row)."""
+        if slot is None:
+            return None
+        return slot.queued_at + _request_timeout(request_manager.gateway(slot.gateway_id)) - time.monotonic()
+
     async def _wait_for_signal(slot, receive, send) -> bool:
         """Wait for the forward signal, racing client disconnect + policies."""
         gw = request_manager.gateway(slot.gateway_id)
-        max_wait = gw.get("max_waiting_time", 300)
+        max_wait = gw.get("max_waiting_time_sec", 300)
         policy = gw.get("wait_timeout_policy", "ESCALATE_PRIORITY")
-        deadline = time.monotonic() + max_wait
+        # Absolute received→completed cap (spec 10): measured from when the
+        # request was received (queued_at). No wait-timeout policy may extend
+        # past it.
+        absolute_deadline = slot.queued_at + _request_timeout(gw)
+        deadline = min(time.monotonic() + max_wait, absolute_deadline)
         escalated = False
 
         while True:
@@ -409,8 +461,19 @@ def make_gateway_proxy(
                     await request_manager.cancel(slot.request_id)
                     return False
                 # stray message — keep waiting
-            # Timeout without signal: apply the wait-timeout policy.
-            if time.monotonic() >= deadline:
+            # Timeout without signal.
+            now = time.monotonic()
+            if now >= absolute_deadline:
+                # Received→completed cap elapsed (spec 10): absolute — it
+                # expires even under a policy that says keep waiting.
+                await request_manager.expire(slot.request_id, "request timeout")
+                try:
+                    await _send_error(send, 503, "request timeout")
+                except Exception:  # noqa: BLE001
+                    pass
+                return False
+            if now >= deadline:
+                # Apply the wait-timeout policy.
                 if policy in ("REJECT", "EXPIRE"):
                     if policy == "EXPIRE":
                         await request_manager.expire(slot.request_id)
@@ -428,7 +491,7 @@ def make_gateway_proxy(
                 if not escalated:
                     escalated = True
                     slot.priority += 5
-                    deadline = time.monotonic() + max_wait
+                    deadline = min(time.monotonic() + max_wait, absolute_deadline)
                     q = request_manager.queue()
                     q.remove(slot.request_id)
                     q.enqueue(slot)

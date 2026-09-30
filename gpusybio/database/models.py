@@ -68,11 +68,11 @@ class Application(Base):
     idle_unload_timeout_sec: Mapped[int | None] = mapped_column(Integer)
     activity_detection_method: Mapped[str] = mapped_column(Text, default="gpu_usage")
     idle_threshold_gpu_pct: Mapped[float] = mapped_column(Float, default=5.0)
-    # Memory-based residency monitor (spec 06 §10): the app is LOADED while its
-    # per-app VRAM >= load threshold and UNLOADED while < unload threshold
-    # (hysteresis; detects load/unload done outside GPUSymbiosis).
-    memory_load_threshold_pct: Mapped[float] = mapped_column(Float, default=80.0)
-    memory_unload_threshold_pct: Mapped[float] = mapped_column(Float, default=20.0)
+    # Memory-based residency monitor (spec 06 §10.2): the app is marked LOADED
+    # while its per-process VRAM >= this absolute MB threshold and UNLOADED
+    # while below it (detects load/unload done outside GPUSymbiosis). 0 =
+    # auto-detection disabled for this app.
+    loaded_gpu_memory_mb: Mapped[float] = mapped_column(Float, default=0.0)
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
 
     api_enabled: Mapped[bool] = mapped_column(Boolean, default=True)

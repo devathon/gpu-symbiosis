@@ -106,8 +106,7 @@ def _apply_app_config(row: Application, spec) -> None:
     row.idle_unload_timeout_sec = spec.idle_unload_timeout_sec
     row.activity_detection_method = spec.activity_detection_method
     row.idle_threshold_gpu_pct = spec.idle_threshold_gpu_pct
-    row.memory_load_threshold_pct = spec.memory_load_threshold_pct
-    row.memory_unload_threshold_pct = spec.memory_unload_threshold_pct
+    row.loaded_gpu_memory_mb = spec.loaded_gpu_memory_mb
     row.pinned = spec.pinned
     row.api_enabled = spec.api_enabled
     row.supports_queueing = spec.supports_queueing

@@ -64,8 +64,7 @@ allow_automatic_unload    BOOLEAN DEFAULT true
 idle_unload_timeout_sec   INTEGER
 activity_detection_method TEXT DEFAULT 'gpu_usage'
 idle_threshold_gpu_pct    REAL
-memory_load_threshold_pct   REAL DEFAULT 80.0
-memory_unload_threshold_pct REAL DEFAULT 20.0
+loaded_gpu_memory_mb      REAL DEFAULT 0.0
 pinned                    BOOLEAN DEFAULT false
 
 api_enabled               BOOLEAN DEFAULT true

@@ -244,8 +244,7 @@ async def test_app_view_exposes_gpu_utilization_and_state(server):
     assert v["state"] == "STOPPED"
     assert "gpu_utilization_pct" in v
     assert "active" in v
-    assert "memory_load_threshold_pct" in v
-    assert "memory_unload_threshold_pct" in v
+    assert "loaded_gpu_memory_mb" in v
     # start (up) → the display state is one of the steady/transient states
     await c.post(f"http://127.0.0.1:{ADMIN_PORT}/api/applications/a1/start")
     await _wait(lambda: _req_running(c, "a1"))

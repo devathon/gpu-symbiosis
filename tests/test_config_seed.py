@@ -310,7 +310,6 @@ def test_column_drift_migration_backfills_defaults(tmp_path):
     with db() as s:
         row = s.get(Application, "a1")  # the exact read that failed in prod
         assert row is not None
-        assert row.memory_load_threshold_pct == 80.0
-        assert row.memory_unload_threshold_pct == 20.0
+        assert row.loaded_gpu_memory_mb == 0.0
         assert row.idle_threshold_gpu_pct == 5.0  # pre-existing column untouched
         assert row.name == "qwen38"
