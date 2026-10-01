@@ -170,17 +170,126 @@ def test_draft_and_lcp_parsing(tmp_path):
     p = str(tmp_path / "a1.log")
     with open(p, "w") as f:
         f.write(
-            "llama_perf_context_print: prompt eval time =    1234.56 ms /   100 tokens "
+            "I slot print_timing: id  0 | task 0 | prompt eval time =    1234.56 ms /   100 tokens "
             "(   12.35 ms per token,   81.00 tokens per second)\n"
             "draft acceptance = 0.40944 (  642 accepted /  1568 generated), mean len =  3.87\n"
             "I slot get_availabl: id  0 | task -1 | selected slot by LCP similarity, f_sim_best = 0.996\n"
+            "I slot release: id  0 | task 0 | stop processing: n_tokens = 5100, truncated = 0\n"
         )
     t = LlamaLogMetrics(p)
     snap = t.read()
     assert snap["input_tokens"] == 100
     assert snap["draft_acceptance"] == round(642 / 1568 * 100.0, 1)  # percentage
-    assert snap["cache_hit_pct"] == 100.0  # 1/1 slot selections used LCP
+    # cached input = stop n_tokens - evaluated - generated (5100 - 100 - 0);
+    # cache hit % is token-based: cached / (cached + input)
+    assert snap["cached_tokens"] == 5000
+    assert snap["cache_hit_pct"] == round(5000 / (5000 + 100) * 100.0, 1)  # 98.0
     assert snap["draft_mean_len"] > 0
+    assert t.state()["slot_selections"] == 1
+    assert t.state()["cache_hit_requests"] == 1
+
+
+def test_cached_tokens_two_requests_lifetime(tmp_path):
+    """Cold request (0 cached) then a cached request: the previous request's
+    full context is retained, so its stop line minus this request's evaluated
+    + generated is the cached input (prod log: 62189 - 0; 62877 - 514 - 174)."""
+    p = str(tmp_path / "a1.log")
+    with open(p, "w") as f:
+        f.write(
+            "I slot print_timing: id  1 | task 0 | prompt eval time =  72672.67 ms /  61306 tokens "
+            "(    1.19 ms per token,   840.76 tokens per second)\n"
+            "I slot print_timing: id  1 | task 0 |        eval time =  30069.76 ms /   883 runs   "
+            "(   34.05 ms per token,    29.36 tokens per second)\n"
+            "I slot print_timing: id  1 | task 0 |       total time = 102742.43 ms /  62189 tokens\n"
+            "I slot release: id  1 | task 0 | stop processing: n_tokens = 62189, truncated = 0\n"
+            "I slot get_availabl: id  1 | task -1 | selected slot by LCP similarity, f_sim_best = 0.997\n"
+            "I slot print_timing: id  1 | task 350 | prompt eval time =   1074.09 ms /   514 tokens "
+            "(    2.09 ms per token,   478.55 tokens per second)\n"
+            "I slot print_timing: id  1 | task 350 |        eval time =   4130.96 ms /   174 runs   "
+            "(   23.74 ms per token,    42.12 tokens per second)\n"
+            "I slot print_timing: id  1 | task 350 |       total time =   5205.06 ms /   688 tokens\n"
+            "I slot release: id  1 | task 350 | stop processing: n_tokens = 62877, truncated = 0\n"
+        )
+    t = LlamaLogMetrics(p)
+    snap = t.read()
+    assert snap["input_tokens"] == 61306 + 514
+    assert snap["output_tokens"] == 883 + 174
+    assert snap["requests"] == 2
+    # request 0 was cold (stop == evaluated + generated); request 350 served
+    # its prefix from the retained context: 62877 - 514 - 174 = 62189 cached.
+    assert snap["cached_tokens"] == 62189
+    assert snap["cache_hit_pct"] == round(62189 / (62189 + 61820) * 100.0, 1)
+
+
+def test_fully_cached_prompt_emits_no_prompt_line(tmp_path):
+    """A fully cached prompt is never batched (llama.cpp skips the prompt line
+    when n_p_eval == 0), so only the stop line reveals its cached input."""
+    p = str(tmp_path / "a1.log")
+    with open(p, "w") as f:
+        f.write(
+            "I slot print_timing: id  1 | task 350 |        eval time =   4130.96 ms /   174 runs   "
+            "(   23.74 ms per token,    42.12 tokens per second)\n"
+            "I slot release: id  1 | task 350 | stop processing: n_tokens = 62877, truncated = 0\n"
+        )
+    t = LlamaLogMetrics(p)
+    snap = t.read()
+    assert snap["input_tokens"] == 0  # no prompt line at all
+    assert snap["output_tokens"] == 174
+    assert snap["cached_tokens"] == 62877 - 174  # everything was cached
+    assert snap["cache_hit_pct"] == 100.0  # all input was cached
+
+
+def test_truncated_stop_line_is_not_counted(tmp_path):
+    """truncated = 1 means the reported n_tokens is not the full context —
+    counting it would under-estimate the cached input."""
+    p = str(tmp_path / "a1.log")
+    with open(p, "w") as f:
+        f.write(
+            "I slot print_timing: id  1 | task 0 | prompt eval time =  1000.00 ms /   100 tokens "
+            "(   10.00 ms per token,   100.00 tokens per second)\n"
+            "I slot release: id  1 | task 0 | stop processing: n_tokens = 5100, truncated = 1\n"
+        )
+    t = LlamaLogMetrics(p)
+    snap = t.read()
+    assert snap["cached_tokens"] == 0
+    assert snap["cache_hit_pct"] == 0.0
+
+
+def test_interleaved_slots_attribute_by_slot_id(tmp_path):
+    """--parallel N > 1 interleaves slots' lines; the per-request counts are
+    keyed by slot id so each stop line uses its own slot's numbers."""
+    p = str(tmp_path / "a1.log")
+    with open(p, "w") as f:
+        f.write(
+            "I slot print_timing: id  0 | task 0 | prompt eval time =  1000.00 ms /   100 tokens "
+            "(   10.00 ms per token,   100.00 tokens per second)\n"
+            "I slot print_timing: id  1 | task 1 | prompt eval time =  2000.00 ms /   200 tokens "
+            "(   10.00 ms per token,   100.00 tokens per second)\n"
+            "I slot print_timing: id  0 | task 0 |        eval time =   500.00 ms /    50 runs   "
+            "(   10.00 ms per token,   100.00 tokens per second)\n"
+            "I slot print_timing: id  1 | task 1 |        eval time =  1000.00 ms /   100 runs   "
+            "(   10.00 ms per token,   100.00 tokens per second)\n"
+            "I slot release: id  0 | task 0 | stop processing: n_tokens = 2600, truncated = 0\n"
+            "I slot release: id  1 | task 1 | stop processing: n_tokens = 4300, truncated = 0\n"
+        )
+    t = LlamaLogMetrics(p)
+    snap = t.read()
+    assert snap["input_tokens"] == 300
+    assert snap["output_tokens"] == 150
+    # (2600 - 100 - 50) + (4300 - 200 - 100) — each stop line uses its own slot
+    assert snap["cached_tokens"] == 2450 + 4000
+
+
+def test_cached_tokens_persist_across_restart(tmp_path):
+    p = str(tmp_path / "a1.log")
+    _write(p, _T1 + "stop processing: n_tokens =    7300, truncated = 0\n")
+    t = LlamaLogMetrics(p)
+    t.read()
+    persisted = t.state()
+    assert persisted["cached_tokens"] == 7300 - 100 - 200  # _T1 has no slot prefix
+    t2 = LlamaLogMetrics(p)
+    t2.seed(persisted)
+    assert t2.read()["cached_tokens"] == 7000  # kept, not re-counted
 
 
 def test_lru_slot_is_not_a_cache_hit(tmp_path):

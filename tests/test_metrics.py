@@ -402,6 +402,7 @@ async def test_metrics_llama_type(server):
     assert m["type"] == "llama"
     spec_ids = [x["id"] for x in m["spec"]]
     assert "input_tokens" in spec_ids
+    assert "cached_tokens" in spec_ids
     assert "draft_acceptance" in spec_ids
     assert "cache_hit_pct" in spec_ids
     # the reduced request blocks: total_tokens and completed_requests are dropped

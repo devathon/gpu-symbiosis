@@ -313,6 +313,7 @@ class MetricsCollector:
                 ems = float(lifetime.get("eval_time_ms", 0.0))
                 for key, v in (
                     ("input_tokens", lifetime.get("input_tokens")),
+                    ("cached_tokens", lifetime.get("cached_tokens")),
                     ("output_tokens", lifetime.get("output_tokens")),
                     ("total_tokens", total),
                     ("prompt_tokens_per_sec",

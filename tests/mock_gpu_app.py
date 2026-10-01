@@ -105,6 +105,10 @@ async def generate(body: dict):
         f"{1000.0 / eval_ms * chunks:8.2f} tokens per second)"
     )
     print(f"llama_perf_context_print:       total time = {total_ms:10.2f} ms / {input_tokens + chunks:5d} tokens")
+    # The mock has no KV cache: the slot's full context after the request is
+    # just this request's evaluated + generated tokens, so the tailer derives
+    # 0 cached input (the real log's "stop processing" line, no slot prefix).
+    print(f"stop processing: n_tokens = {input_tokens + chunks:5d}, truncated = 0")
     sys.stdout.flush()
 
     async def gen():

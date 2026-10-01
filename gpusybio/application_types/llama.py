@@ -14,6 +14,16 @@ and slot selection):
           total time = 6913.46 ms / 300 tokens
     draft acceptance = 0.40944 (  642 accepted /  1568 generated), mean len =  3.87
     selected slot by LCP similarity, f_sim_best = 0.996 (> 0.100 thold), f_keep = 0.997
+    stop processing: n_tokens = 62189, truncated = 0
+
+The prompt line only counts the tokens actually evaluated — when the slot
+serves the prompt from the KV cache, llama.cpp batches just the suffix after
+the cached prefix (or nothing at all for a fully cached prompt, in which case
+no prompt line is emitted). The ``stop processing`` line logs the slot's full
+context after the request (retained prefix + evaluated + generated), so the
+cached input is ``n_tokens - evaluated - generated`` for that request —
+scoped per slot id, so interleaved slots (``--parallel N``) attribute
+correctly. Lines with ``truncated = 1`` under-count and are skipped.
 
 The tailer tracks a read offset and accumulates LIFETIME totals that persist
 across restarts: the lifetime + offset + a session fingerprint are stored
@@ -50,11 +60,19 @@ _DRAFT_RE = re.compile(
     r"draft acceptance\s*=\s*([\d.]+)\s*\(\s*(\d+)\s*accepted\s*/\s*(\d+)\s*generated\)"
     r".*?mean len\s*=\s*([\d.]+)"
 )
-# Slot selection (the denominator for cache-hit %): one per request.
+# Slot selection: one per request (request-based cache statistic).
 _SLOT_RE = re.compile(r"I slot get_availabl")
-# Cache hit: the slot was selected by LCP (prefix) similarity — the prompt was
-# largely served from the KV cache.
+# The slot was selected by LCP (prefix) similarity — the prompt was largely
+# served from the KV cache (request-based cache statistic).
 _LCP_RE = re.compile(r"selected slot by LCP similarity")
+# stop processing: n_tokens = 62189, truncated = 0
+# The slot's full context after the request: retained (cached) prefix +
+# evaluated + generated. The source for the cached-input total.
+_STOP_RE = re.compile(r"stop processing:\s*n_tokens\s*=\s*(\d+)\s*,\s*truncated\s*=\s*(\d+)")
+# Slot id for per-request attribution: "I slot print_timing: id  1 | ..." —
+# slots interleave when --parallel N > 1, so the per-request counts are kept
+# per slot id. Lines without a slot prefix share the "" bucket.
+_SLOT_ID_RE = re.compile(r"I slot\s+\w+:\s*id\s*(\d+)\s*\|")
 
 _FINGERPRINT_BYTES = 64
 
@@ -82,6 +100,13 @@ class LlamaLogMetrics:
         self._draft_mean_len_weighted = 0.0
         self._slot_selections = 0
         self._cache_hit_requests = 0
+        # Cached input: lifetime tokens of prompts served from the KV cache
+        # (stop line n_tokens minus this request's evaluated + generated).
+        self._cached_tokens = 0
+        # Per-request evaluated/generated counts, keyed by slot id (cleared on
+        # the request's stop line) — the stop line has no prompt/eval numbers.
+        self._req_input: dict[str, int] = {}
+        self._req_output: dict[str, int] = {}
 
     # -- persistence (spec 08 §5.1) ------------------------------------------
     def seed(self, state: dict) -> None:
@@ -98,6 +123,7 @@ class LlamaLogMetrics:
         self._draft_mean_len_weighted = float(state.get("draft_mean_len_weighted", 0.0))
         self._slot_selections = int(state.get("slot_selections", 0))
         self._cache_hit_requests = int(state.get("cache_hit_requests", 0))
+        self._cached_tokens = int(state.get("cached_tokens", 0))
         self._offset = int(state.get("log_offset", 0))
         fp = state.get("log_fingerprint", b"")
         self._fingerprint = fp if isinstance(fp, bytes) else bytes(fp)
@@ -118,6 +144,7 @@ class LlamaLogMetrics:
             "draft_mean_len_weighted": self._draft_mean_len_weighted,
             "slot_selections": self._slot_selections,
             "cache_hit_requests": self._cache_hit_requests,
+            "cached_tokens": self._cached_tokens,
             "log_offset": self._offset,
             "log_fingerprint": self._fingerprint,
         }
@@ -173,14 +200,18 @@ class LlamaLogMetrics:
             return b""
 
     def _consume(self, line: str) -> None:
+        m = _SLOT_ID_RE.search(line)
+        sid = m.group(1) if m else ""
         m = _PROMPT_RE.search(line)
         if m:
             self._input_tokens += int(m.group(2))
             self._prompt_time_ms += float(m.group(1))
+            self._req_input[sid] = int(m.group(2))
         m = _EVAL_RE.search(line)
         if m:
             self._output_tokens += int(m.group(2))
             self._eval_time_ms += float(m.group(1))
+            self._req_output[sid] = int(m.group(2))
         m = _TOTAL_RE.search(line)
         if m:
             self._total_time_ms += float(m.group(1))
@@ -195,6 +226,19 @@ class LlamaLogMetrics:
             self._slot_selections += 1
         if _LCP_RE.search(line):
             self._cache_hit_requests += 1
+        m = _STOP_RE.search(line)
+        if m:
+            # Full context after the request = retained (cached) prefix +
+            # evaluated + generated for THIS request. A fully cached prompt
+            # emitted no prompt line (evaluated = 0), which is why the stop
+            # line is the only reliable cached-input source.
+            if m.group(2) == "0":
+                self._cached_tokens += max(
+                    0, int(m.group(1)) - self._req_input.get(sid, 0)
+                    - self._req_output.get(sid, 0)
+                )
+            self._req_input.pop(sid, None)
+            self._req_output.pop(sid, None)
 
     def reset(self) -> None:
         """Start a fresh lifetime (explicit; NOT called on app restart — the
@@ -214,6 +258,9 @@ class LlamaLogMetrics:
         self._draft_mean_len_weighted = 0.0
         self._slot_selections = 0
         self._cache_hit_requests = 0
+        self._cached_tokens = 0
+        self._req_input = {}
+        self._req_output = {}
 
     def _snapshot(self, stale: bool = False) -> dict:
         total_tokens = self._total_tokens or (self._input_tokens + self._output_tokens)
@@ -226,11 +273,13 @@ class LlamaLogMetrics:
         draft_mean_len = (
             self._draft_mean_len_weighted / self._draft_generated
         ) if self._draft_generated else 0.0
-        cache_hit_pct = (
-            self._cache_hit_requests / self._slot_selections * 100.0
-        ) if self._slot_selections else 0.0
+        # Token-based: cached input as a share of all input (cached +
+        # newly-evaluated).
+        cache_denom = self._cached_tokens + self._input_tokens
+        cache_hit_pct = (self._cached_tokens / cache_denom * 100.0) if cache_denom else 0.0
         return {
             "input_tokens": self._input_tokens,
+            "cached_tokens": self._cached_tokens,
             "output_tokens": self._output_tokens,
             "total_tokens": total_tokens,
             "prompt_tokens_per_sec": prompt_tps,
@@ -250,6 +299,7 @@ class LlamaLogMetrics:
 
 LLAMA_SPEC = TypeSpec("llama", [
     MetricDef("input_tokens", "Input tokens", "counter", "", "handler", "card", "tokens"),
+    MetricDef("cached_tokens", "Cached Input", "counter", "", "handler", "card", "tokens"),
     MetricDef("output_tokens", "Output tokens", "counter", "", "handler", "card", "tokens"),
     MetricDef("cache_hit_pct", "Cache Hit %", "gauge", "", "handler", "card", "cache",
               aggregation="avg"),
@@ -277,7 +327,8 @@ class LlamaHandler:
     """
 
     _TOKEN_KEYS = (
-        "total_tokens", "input_tokens", "output_tokens", "requests", "completed_requests",
+        "total_tokens", "input_tokens", "cached_tokens", "output_tokens", "requests",
+        "completed_requests",
         "tokens_per_sec", "prompt_tokens_per_sec", "generation_tokens_per_sec",
         "draft_acceptance", "draft_mean_len", "cache_hit_pct",
     )

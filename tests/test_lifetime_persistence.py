@@ -37,12 +37,13 @@ def test_lifetime_store_roundtrip_and_upsert(tmp_path):
         "total_time_ms": 6913.46, "prompt_time_ms": 1234.56, "eval_time_ms": 5678.90,
         "requests": 1,
         "draft_accepted": 642, "draft_generated": 1568,
-        "slot_selections": 3, "cache_hit_requests": 2,
+        "slot_selections": 3, "cache_hit_requests": 2, "cached_tokens": 62189,
         "log_offset": 500, "log_fingerprint": b"session-head-bytes",
     }
     store.save("a1", state)
     got = store.load("a1")
     assert got["input_tokens"] == 100
+    assert got["cached_tokens"] == 62189
     assert got["prompt_time_ms"] == 1234.56
     assert got["eval_time_ms"] == 5678.90
     assert got["log_offset"] == 500
@@ -102,6 +103,7 @@ def test_app_metrics_fallback_uses_persisted_lifetime(tmp_path):
     store = LifetimeStore(_factory(tmp_path))
     store.save("a1", {
         "input_tokens": 100, "output_tokens": 200, "total_tokens": 300,
+        "cached_tokens": 62189,
         "total_time_ms": 6913.46, "prompt_time_ms": 1234.56,
         "eval_time_ms": 3333.33, "requests": 1,
         "log_offset": 500, "log_fingerprint": b"head",
@@ -124,6 +126,7 @@ def test_app_metrics_fallback_uses_persisted_lifetime(tmp_path):
             ems = float(lifetime.get("eval_time_ms", 0.0))
             for key, v in (
                 ("input_tokens", lifetime.get("input_tokens")),
+                ("cached_tokens", lifetime.get("cached_tokens")),
                 ("output_tokens", lifetime.get("output_tokens")),
                 ("total_tokens", total),
                 ("prompt_tokens_per_sec",
@@ -135,6 +138,7 @@ def test_app_metrics_fallback_uses_persisted_lifetime(tmp_path):
                 if v and not type_metrics.get(key):
                     type_metrics[key] = v
     assert type_metrics["input_tokens"] == 100
+    assert type_metrics["cached_tokens"] == 62189
     assert type_metrics["output_tokens"] == 200
     assert type_metrics["total_tokens"] == 300
     assert type_metrics["prompt_tokens_per_sec"] == pytest.approx(81.0, rel=1e-3)

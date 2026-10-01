@@ -194,7 +194,8 @@ def test_metrics_view_groups_and_requests_dedupe():
     from gpusybio.metrics import _metrics_view
 
     values = {
-        "input_tokens": 100, "output_tokens": 50, "tokens_per_sec": 1.0,
+        "input_tokens": 100, "cached_tokens": 5000, "output_tokens": 50,
+        "tokens_per_sec": 1.0,
         "prompt_tokens_per_sec": 81.0, "generation_tokens_per_sec": 60.0,
         "draft_acceptance": 43.8, "cache_hit_pct": 66.7,
         "requests": 7, "requests_received": 12, "requests_failed": 1,
@@ -208,8 +209,11 @@ def test_metrics_view_groups_and_requests_dedupe():
     assert "requests_received" not in ids
     assert [v for v in view if v["id"] == "requests"][0]["value"] == 7
     # groups come from the type's spec (spec 08 §9)
+    # cached input is the second card, right after input tokens
+    assert ids.index("cached_tokens") == ids.index("input_tokens") + 1
     groups = {v["id"]: v["group"] for v in view}
     assert groups["input_tokens"] == "tokens"
+    assert groups["cached_tokens"] == "tokens"
     assert groups["prompt_tokens_per_sec"] == "rates"
     assert groups["draft_acceptance"] == "speculative"
     assert groups["requests"] == "requests"
