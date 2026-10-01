@@ -44,6 +44,9 @@ export interface AppView {
   activity_detection_method: string;
   idle_threshold_gpu_pct: number;
   loaded_gpu_memory_mb: number;
+  // The app-level concurrency limit — the value the request manager actually
+  // enforces (editable in the app form, applied live).
+  max_concurrent_requests: number;
 }
 
 export interface GwView {
@@ -268,6 +271,7 @@ export interface AppFormFields {
   activity_detection_method: string;
   idle_threshold_gpu_pct: number;
   loaded_gpu_memory_mb: number;
+  max_concurrent_requests: number;
 }
 
 // -- gateway form (spec 11 §3) --------------------------------------------------

@@ -87,3 +87,131 @@ def test_cancel_inflight_releases_slot_when_db_is_unavailable():
         assert rm.can_forward_now("gw1") is True
 
     asyncio.run(run())
+
+
+def _make_rm_gw(gw_limit: int | None, app_limit: int) -> RequestManager:
+    app_state = StateManager()
+    app_state.set_process("app1", ProcessState.RUNNING)
+    app_state.set_residency("app1", ResidencyState.LOADED)
+    gw = {"id": "gw1", "application_id": "app1", "max_waiting_queue": 50,
+          "priority": 1, "max_waiting_time_sec": 300,
+          "wait_timeout_policy": "ESCALATE_PRIORITY"}
+    if gw_limit is not None:
+        gw["max_concurrent_requests"] = gw_limit
+    return RequestManager(
+        app_state, _BrokenDB(), EventBus(), _Settings(),
+        {"gw1": gw},
+        {"app1": {"max_concurrent_requests": app_limit}},
+    )
+
+
+def test_gateway_limit_caps_inflight_below_app_limit():
+    """The gateway's own concurrency cap bounds THIS gateway's in-flight
+    requests even while the app's shared pool has room (min-of-two
+    semantics). A missing gateway key means no gateway-level cap."""
+    import asyncio
+
+    rm = _make_rm_gw(1, 3)  # app allows 3, this gateway only 1 at a time
+
+    async def run():
+        slot = await rm.receive("gw1")
+        assert await rm.begin_forward(slot.request_id) == "app1"
+        assert rm.active_count("app1") == 1
+        # Second request through the same gateway is held, although the app
+        # still has 2 free slots.
+        slot2 = await rm.receive("gw1")
+        assert slot2 is not None
+        assert await rm.begin_forward(slot2.request_id) is None
+        assert rm.active_count("app1") == 1
+        assert rm.queued_count("app1") == 1
+        # Freeing the gateway's slot frees the app slot.
+        await rm.complete(slot.request_id)
+        assert rm.active_count("app1") == 0
+        assert rm.can_forward_now("gw1") is True
+        assert await rm.begin_forward(slot2.request_id) == "app1"
+        assert rm.active_count("app1") == 1
+
+    asyncio.run(run())
+
+
+def test_app_limit_still_caps_when_gateway_limit_is_higher():
+    """The app-level cap (shared pool) still bounds in-flight requests when
+    the gateway's own cap is looser."""
+    import asyncio
+
+    rm = _make_rm_gw(5, 1)  # app allows 1, gateway allows 5
+
+    async def run():
+        slot = await rm.receive("gw1")
+        assert await rm.begin_forward(slot.request_id) == "app1"
+        slot2 = await rm.receive("gw1")
+        assert slot2 is not None
+        assert await rm.begin_forward(slot2.request_id) is None
+        assert rm.active_count("app1") == 1
+        assert rm.queued_count("app1") == 1
+        await rm.complete(slot.request_id)
+        assert await rm.begin_forward(slot2.request_id) == "app1"
+
+    asyncio.run(run())
+
+
+def test_missing_gateway_key_means_no_gateway_cap():
+    """A gateway config without the key imposes no gateway-level cap — the
+    app limit alone governs (backward compatible with pre-existing configs)."""
+    import asyncio
+
+    rm = _make_rm_gw(None, 2)
+
+    async def run():
+        slots = [await rm.receive("gw1") for _ in range(2)]
+        assert all(s is not None for s in slots)
+        assert await rm.begin_forward(slots[0].request_id) == "app1"
+        assert await rm.begin_forward(slots[1].request_id) == "app1"
+        assert rm.active_count("app1") == 2
+        slot3 = await rm.receive("gw1")
+        assert await rm.begin_forward(slot3.request_id) is None
+
+    asyncio.run(run())
+
+
+def test_app_pool_capped_across_gateways():
+    """Two gateways on the same app: the app's shared pool (not each
+    gateway's cap) bounds TOTAL in-flight across both."""
+    import asyncio
+
+    app_state = StateManager()
+    app_state.set_process("app1", ProcessState.RUNNING)
+    app_state.set_residency("app1", ResidencyState.LOADED)
+    rm = RequestManager(
+        app_state, _BrokenDB(), EventBus(), _Settings(),
+        {
+            "gw1": {"id": "gw1", "application_id": "app1", "max_waiting_queue": 50,
+                    "priority": 1, "max_waiting_time_sec": 300,
+                    "wait_timeout_policy": "ESCALATE_PRIORITY",
+                    "max_concurrent_requests": 2},
+            "gw2": {"id": "gw2", "application_id": "app1", "max_waiting_queue": 50,
+                    "priority": 1, "max_waiting_time_sec": 300,
+                    "wait_timeout_policy": "ESCALATE_PRIORITY",
+                    "max_concurrent_requests": 2},
+        },
+        {"app1": {"max_concurrent_requests": 2}},
+    )
+
+    async def run():
+        r1 = await rm.receive("gw1")
+        r2 = await rm.receive("gw2")
+        r3 = await rm.receive("gw1")
+        assert all(s is not None for s in (r1, r2, r3))
+        assert await rm.begin_forward(r1.request_id) == "app1"
+        assert await rm.begin_forward(r2.request_id) == "app1"
+        # App pool (2) is full — gw1's own cap (2) still has room, but the
+        # shared pool does not.
+        assert rm.active_count("app1") == 2
+        assert await rm.begin_forward(r3.request_id) is None
+        assert rm.queued_count("app1") == 1
+        # Freeing one slot (on gw2) lets the queued request forward.
+        await rm.complete(r2.request_id)
+        assert await rm.begin_forward(r3.request_id) == "app1"
+        assert rm.active_count("app1") == 2
+
+    asyncio.run(run())

@@ -91,9 +91,14 @@ def register(api, ctx) -> None:
             # is ``unload_script`` — read sites derive the flag from it.
             row.supports_load_unload = bool(row.unload_script)
         apps.load_config(app_id)
-        request_manager.app_configs().update(
-            {app_id: {"max_concurrent_requests": request_manager.app_configs()[app_id]["max_concurrent_requests"]}}
-        )
+        # Live update (no restart): the running request manager must honor the
+        # new limit from the row just saved. (Previously this copied the live
+        # value into itself — a no-op — so the change only applied after a
+        # restart.) Direct assignment also covers an app id missing from the
+        # live config (old code would have raised KeyError).
+        request_manager.app_configs()[app_id] = {
+            "max_concurrent_requests": row.max_concurrent_requests
+        }
         await _audit("application_updated", actor=_actor(request), detail=app_id)
         return {"id": app_id, "transition": None}
 

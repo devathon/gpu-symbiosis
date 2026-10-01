@@ -29,6 +29,7 @@ const EMPTY: AppFormFields = {
   activity_detection_method: "gpu_usage",
   idle_threshold_gpu_pct: 5,
   loaded_gpu_memory_mb: 0,
+  max_concurrent_requests: 1,
 };
 
 const fromView = (v: AppView): AppFormFields => ({
@@ -56,6 +57,7 @@ const fromView = (v: AppView): AppFormFields => ({
   activity_detection_method: v.activity_detection_method ?? "gpu_usage",
   idle_threshold_gpu_pct: v.idle_threshold_gpu_pct ?? 5,
   loaded_gpu_memory_mb: v.loaded_gpu_memory_mb ?? 0,
+  max_concurrent_requests: v.max_concurrent_requests ?? 1,
 });
 
 export default function AppForm({
@@ -105,6 +107,7 @@ export default function AppForm({
       cpu_memory_required_mb: num(f.cpu_memory_required_mb ? String(f.cpu_memory_required_mb) : ""),
       idle_unload_timeout_sec: num(f.idle_unload_timeout_sec ? String(f.idle_unload_timeout_sec) : ""),
       loaded_gpu_memory_mb: Math.max(0, Number(f.loaded_gpu_memory_mb) || 0),
+      max_concurrent_requests: Math.max(1, Number(f.max_concurrent_requests) || 1),
     };
     if (editing) {
       act(() => api.appUpdate(editing.id, fields));
@@ -245,6 +248,20 @@ export default function AppForm({
           </Row>
           <Row label="Ready check URL">
             <input className={inp} value={f.ready_check_url ?? ""} onChange={(e) => set("ready_check_url", e.target.value || null)} />
+          </Row>
+          <Row label="Max concurrent requests">
+            <div className="min-w-0">
+              <input
+                className={inp}
+                type="number"
+                min="1"
+                value={f.max_concurrent_requests}
+                onChange={(e) => set("max_concurrent_requests", Number(e.target.value) || 1)}
+              />
+              <p className="mt-0.5 text-[11px] text-zinc-600">
+                Concurrent in-flight requests allowed; the rest wait in the queue. Applied live — no restart.
+              </p>
+            </div>
           </Row>
         </Fieldset>
 

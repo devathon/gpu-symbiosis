@@ -81,6 +81,11 @@ def _app_view(row: Application, state, resources) -> dict:
         "health_check_url": row.health_check_url,
         "ready_check_url": row.ready_check_url,
         "cpu_memory_required_mb": row.cpu_memory_required_mb,
+        # The app-level concurrency limit — caps the app's shared pool across
+        # ALL its gateways. A gateway's own max_concurrent_requests (when set)
+        # further caps that gateway's in-flight share; the enforced limit is
+        # the stricter of the two (min). Both editable live, no restart.
+        "max_concurrent_requests": row.max_concurrent_requests,
         "gpu_memory_safety_margin": row.gpu_memory_safety_margin,
         "idle_unload_timeout_sec": row.idle_unload_timeout_sec,
         "activity_detection_method": row.activity_detection_method,

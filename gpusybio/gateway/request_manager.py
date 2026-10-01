@@ -187,6 +187,26 @@ class RequestManager:
             return cfg.get("max_concurrent_requests", 1)
         return 1
 
+    def gateway_limit(self, gateway_id: str) -> int | None:
+        """Per-gateway concurrency cap, or None when unset (no gateway-level
+        cap). Enforced as the stricter of the two: the app limit caps the
+        app's shared pool (all gateways on it), the gateway limit caps this
+        gateway's own share of in-flight requests."""
+        cfg = self._gateways.get(gateway_id)
+        if cfg is None:
+            return None
+        return cfg.get("max_concurrent_requests")
+
+    def _slot_free(self, app_id: str, gateway_id: str) -> bool:
+        """Both concurrency caps have room: the app's shared pool AND this
+        gateway's own in-flight set (min-of-two semantics)."""
+        if len(self._active.get(app_id, ())) >= self.app_limit(app_id):
+            return False
+        gw_cap = self.gateway_limit(gateway_id)
+        if gw_cap is not None and len(self._active_gw.get(gateway_id, ())) >= gw_cap:
+            return False
+        return True
+
     def can_forward_now(self, gateway_id: str) -> bool:
         """App ready + concurrency slot free → forward directly, no queueing."""
         gw = self._gateways.get(gateway_id)
@@ -200,9 +220,7 @@ class RequestManager:
             return False
         if s.draining:
             return False
-        if len(self._active.get(app_id, ())) >= self.app_limit(app_id):
-            return False
-        return True
+        return self._slot_free(app_id, gateway_id)
 
     # -- forward bookkeeping -----------------------------------------------------
     async def begin_forward(self, request_id: str) -> str | None:
@@ -221,7 +239,7 @@ class RequestManager:
             self._queue.enqueue(slot)  # not ready — back in the queue for the scheduler
             return None
         async with self._lock:
-            if len(self._active.get(app_id, ())) >= self.app_limit(app_id):
+            if not self._slot_free(app_id, slot.gateway_id):
                 self._queue.enqueue(slot)  # back to the queue
                 return None
             self._active.setdefault(app_id, set()).add(request_id)

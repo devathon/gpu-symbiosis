@@ -198,6 +198,23 @@ async def test_app_crud_round_trip(server):
     await c.aclose()
 
 
+async def test_app_update_max_concurrent_live(server):
+    """Spec 10 §1: PUT /api/applications/{id} applies max_concurrent_requests
+    to the running request manager without a restart. (The live update used
+    to copy the live value into itself — a no-op — so limit changes only took
+    effect after a restart; the dashboard then kept enforcing the stale limit.)
+    """
+    c = httpx.AsyncClient()
+    r = await c.put(f"http://127.0.0.1:{ADMIN_PORT}/api/applications/a1",
+                    json={"max_concurrent_requests": 3})
+    assert r.status_code == 200, r.text
+    got = (await c.get(f"http://127.0.0.1:{ADMIN_PORT}/api/applications/a1")).json()
+    assert got["max_concurrent_requests"] == 3
+    # The running request manager honors the new value immediately.
+    assert server.request_manager.app_configs()["a1"]["max_concurrent_requests"] == 3
+    await c.aclose()
+
+
 async def test_auth_csrf_endpoint(server):
     """Spec 12 §3: the double-submit CSRF token is re-acquirable per session."""
     c = httpx.AsyncClient()

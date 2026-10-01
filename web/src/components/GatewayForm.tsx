@@ -140,7 +140,12 @@ export default function GatewayForm({
               />
             </Row>
             <Row label="Max concurrent requests">
-              <input className={inp} type="number" value={f.max_concurrent_requests} onChange={(e) => set("max_concurrent_requests", Number(e.target.value))} />
+              <div className="min-w-0">
+                <input className={inp} type="number" min="1" value={f.max_concurrent_requests} onChange={(e) => set("max_concurrent_requests", Number(e.target.value) || 1)} />
+                <p className="mt-0.5 text-[11px] text-zinc-600">
+                  Caps this gateway's own in-flight requests. The enforced limit is the stricter of this value and the app's limit. Applied live — no restart.
+                </p>
+              </div>
             </Row>
           </div>
         </div>
