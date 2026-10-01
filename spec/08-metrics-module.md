@@ -265,13 +265,19 @@ TypeSpec
 ──────────────────────
 type                 type name
 metrics              list[MetricDef]     ← what to record and display
-should_schedule()    (method, path) -> bool  ← routing (spec 05 §6)
+scheduled_patterns   list[str] | None    ← routing regexes (spec 05 §6); None = all scheduled
+should_schedule()    (method, path) -> bool  ← routing decision (spec 05 §6)
 ```
 
-`should_schedule` (default `True`) declares which requests go through the
-scheduler vs pass through directly (spec 05 §6). `comfyui` overrides it: only
-`POST /api/prompt` is scheduled; reads / static / the websocket pass through
-blindly. The app view also exposes `gpu_utilization_pct` alongside
+`scheduled_patterns` (default `None`) is the **easily-modifiable array of path
+regexes** (matched with `re.search`) that declare which requests go through the
+scheduler vs pass through directly (spec 05 §6); `None` (the default) means
+every request is scheduled. `should_schedule` is the resulting decision.
+`comfyui` sets `scheduled_patterns = [r"^/api/", r"^/api/prompt", r"^/$"]`:
+the `/api/*` family (which includes `/api/prompt`) and the naked root `/` are
+scheduled, while the frontend static assets, the websocket, and other reads pass
+through directly — denied immediately (503) while the app is stopped and never
+waking it. Edit the array to change routing. The app view also exposes `gpu_utilization_pct` alongside
 `gpu_memory_used_mb` (spec 04 §3 — RUNNING is based on GPU utilization).
 
 The registry holds no type-specific code: it resolves type → (spec, handler

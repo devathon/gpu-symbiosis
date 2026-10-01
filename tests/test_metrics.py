@@ -156,13 +156,19 @@ def test_type_registry_builtin_and_custom():
 
 
 def test_should_schedule_routing():
-    """spec 05 §6: the application type declares which requests are scheduled."""
+    """spec 05 §6: the application type declares which requests are scheduled,
+    as an easily-modifiable array of path regexes."""
     from gpusybio.metrics.typespec import TypeSpec
     from gpusybio.application_types.comfyui import COMFYUI_SPEC
-    # comfyui: only the prompt-submission endpoint is scheduled
+    # comfyui: only /api/prompt (queue submissions) and the naked root "/" are
+    # scheduled; other /api/* reads pass through
     assert COMFYUI_SPEC.should_schedule("POST", "/api/prompt") is True
     assert COMFYUI_SPEC.should_schedule("GET", "/api/system_stats") is False
-    assert COMFYUI_SPEC.should_schedule("GET", "/") is False
+    assert COMFYUI_SPEC.should_schedule("GET", "/api/queue") is False
+    assert COMFYUI_SPEC.should_schedule("GET", "/") is True
+    # everything else (frontend static, other reads) passes through
+    assert COMFYUI_SPEC.should_schedule("GET", "/index.html") is False
+    assert COMFYUI_SPEC.should_schedule("GET", "/ws") is False
     # default type: everything is scheduled
     assert TypeSpec("llama").should_schedule("POST", "/api/chat") is True
     assert TypeSpec("generic").should_schedule("GET", "/anything") is True

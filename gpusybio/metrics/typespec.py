@@ -10,6 +10,7 @@ config and ``generic`` is the fallback every application works with.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -37,11 +38,24 @@ class TypeSpec:
                 return m
         return None
 
+    def __post_init__(self) -> None:
+        # spec 05 §6: compile the scheduled-path regexes once. A subclass may
+        # declare the ``scheduled_patterns`` class attribute — an array of path
+        # regexes. Absent/None means every request is scheduled (the default).
+        patterns = getattr(self, "scheduled_patterns", None)
+        self._scheduled_patterns = (
+            None if patterns is None else [re.compile(p) for p in patterns]
+        )
+
     # spec 05 §6: which requests go through the scheduler (queue / LB / demand)
-    # vs pass through directly (blindly, even while the app is stopped).
-    # Default: everything is scheduled.
+    # vs pass through directly. A request is scheduled when its path matches any
+    # entry of the ``scheduled_patterns`` regex array (re.search); with no array
+    # every request is scheduled. ``method`` is part of the contract (drop-in
+    # types may use it) but the default decision is path-based only.
     def should_schedule(self, method: str, path: str) -> bool:
-        return True
+        if self._scheduled_patterns is None:
+            return True
+        return any(p.search(path) for p in self._scheduled_patterns)
 
 
 # -- type-agnostic spec (spec 04 §8.1) ------------------------------------------

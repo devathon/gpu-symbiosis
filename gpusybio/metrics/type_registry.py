@@ -30,7 +30,9 @@ required
 optional
     handler.get_request_metrics(...)     — request completion metrics
     handler.detect_activity(...)         — GPU-activity interpretation
-    spec.should_schedule(method, path)   — gateway routing (spec 05 §6)
+    spec.scheduled_patterns              — array of scheduled path regexes
+                                           (gateway routing, spec 05 §6);
+                                           should_schedule() derives from it
     handler.tailer(app_id)              — lifetime tailer: any object with
                                           read()/state()/seed(); the collector
                                           only ever calls state()/seed()

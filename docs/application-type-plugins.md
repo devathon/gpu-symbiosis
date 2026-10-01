@@ -72,7 +72,8 @@ def MyHandler(resources, states, request_metrics, base_urls, session=None, log_p
 | `handler.get_request_metrics(...)` | no | request-completion metrics (tokens/sec, etc.) |
 | `handler.detect_activity(...)` | no | interpret GPU usage as "active" for a no-gateway app |
 | `handler.tailer(app_id)` | no | lifetime tailer: any object with `read()`/`state()`/`seed()` |
-| `spec.should_schedule(method, path)` | no | which requests are scheduled vs. pass through (default: all) |
+| `spec.scheduled_patterns` | no | array of path regexes (e.g. `["^/api/"]`) that are scheduled; `None` (default) = all scheduled |
+| `spec.should_schedule(method, path)` | no | the routing decision the gateway calls; derived from `scheduled_patterns` |
 
 `collect_metrics` is the heart of the plugin. The collector calls it once per second
 per resident app; return a dict keyed by the `id` of each field you declared with

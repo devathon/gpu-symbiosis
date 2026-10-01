@@ -12,14 +12,16 @@ from gpusybio.metrics.type_registry import TypePlugin
 from gpusybio.metrics.typespec import MetricDef, TypeSpec
 
 
-# spec 05 §6: only the prompt-submission endpoint goes through the scheduler;
-# reads / static / websocket pass through directly. The set is a class
-# attribute so it can be extended without subclassing again.
+# spec 05 §6: the ComfyUI API serves the entire frontend. Only the /api/* family
+# (which includes /api/prompt) and the naked root "/" go through the scheduler;
+# everything else (frontend static assets, the websocket, other reads) passes
+# through directly. Pass-through requests are denied immediately while the app
+# is stopped and never contribute to demand / request metrics.
+#
+# ``scheduled_patterns`` is the easily-modifiable array of path regexes
+# (matched with re.search) that are scheduled. Edit it here to change routing.
 class ComfyUISpec(TypeSpec):
-    scheduled_endpoints: set[tuple[str, str]] = {("POST", "/api/prompt")}
-
-    def should_schedule(self, method: str, path: str) -> bool:
-        return (method.upper(), path) in self.scheduled_endpoints
+    scheduled_patterns = [r"^/api/prompt", r"^/$"]
 
 
 COMFYUI_SPEC = ComfyUISpec("comfyui", [

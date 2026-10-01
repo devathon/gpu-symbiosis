@@ -61,6 +61,12 @@ class RequestManager:
         self._active_gw: dict[str, set[str]] = {}
         # request_id -> gateway_id (in-flight only; used to drop the gw mapping)
         self._gw_of: dict[str, str] = {}
+        # request_id -> slot (in-flight only). begin_forward removes the slot
+        # from the queue, so terminal-state resolution (complete/cancel/expire)
+        # must not depend on the queue or the DB: if the initial persist failed
+        # (swallowed), a DB-only lookup yields app_id="" and the concurrency
+        # slot is never released, clogging the app forever.
+        self._inflight: dict[str, RequestSlot] = {}
         self._lock = asyncio.Lock()
         # Demand tracking for the scheduler scoring model (spec 06 §6.3/§6.4).
         self._demand = DemandTracker()
@@ -221,6 +227,7 @@ class RequestManager:
             self._active.setdefault(app_id, set()).add(request_id)
             self._active_gw.setdefault(slot.gateway_id, set()).add(request_id)
             self._gw_of[request_id] = slot.gateway_id
+            self._inflight[request_id] = slot
         self._states.request_started(app_id)
         self._states.ensure(app_id).queued_requests = self.queued_count(app_id)
         await self._update_status(request_id, "PROCESSING", started_at=True)
@@ -234,7 +241,11 @@ class RequestManager:
         self, request_id: str, error: str | None = None,
         input_tokens: int | None = None, output_tokens: int | None = None,
     ) -> None:
-        slot = self._queue.get(request_id) or self._slot_from_db(request_id)
+        slot = (
+            self._inflight.get(request_id)
+            or self._queue.get(request_id)
+            or self._slot_from_db(request_id)
+        )
         app_id = slot.application_id if slot else ""
         ok = error is None
         status = "COMPLETED" if ok else "FAILED"
@@ -245,12 +256,14 @@ class RequestManager:
         """Client disconnect / queue full / explicit clear (Invariant 6)."""
         slot = self._queue.remove(request_id)
         if slot is None:
-            slot = self._slot_from_db(request_id)
+            slot = self._inflight.get(request_id) or self._slot_from_db(request_id)
         app_id = slot.application_id if slot else ""
         await self._finish(request_id, "CANCELLED", app_id, "client disconnected")
 
     async def expire(self, request_id: str, detail: str = "wait timeout") -> None:
         slot = self._queue.remove(request_id)
+        if slot is None:
+            slot = self._inflight.get(request_id) or self._slot_from_db(request_id)
         app_id = slot.application_id if slot else ""
         await self._finish(request_id, "EXPIRED", app_id, detail)
 
@@ -281,6 +294,7 @@ class RequestManager:
                 if gw_id in self._active_gw and not self._active_gw[gw_id]:
                     del self._active_gw[gw_id]
                 self._gw_of.pop(request_id, None)
+                self._inflight.pop(request_id, None)
             if app_id:
                 self._states.request_finished(app_id)
         ev = self._forward.pop(request_id, None)

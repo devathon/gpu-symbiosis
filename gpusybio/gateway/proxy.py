@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import time
 
+from gpusybio.applications.lifecycle import ProcessState
 from gpusybio.events.log import get_logger
 from gpusybio.gateway.request_manager import RequestManager
 
@@ -55,9 +56,13 @@ _HOP_HEADERS = {
 
 def build_path(scope: dict) -> str:
     """Request path + query from an ASGI scope (spike finding: bytes fields)."""
-    path = scope["path"]
+    # Prefer raw_path: scope["path"] is percent-decoded, which mangles encoded
+    # sequences some apps rely on inside a single segment (e.g. ComfyUI
+    # /api/userdata/workflows%2Ffoo.json — a literal / breaks the upstream
+    # route and 404s). Decode latin-1 to preserve the raw bytes as-is.
+    path = scope.get("raw_path", scope["path"])
     if isinstance(path, bytes):
-        path = path.decode()
+        path = path.decode("latin-1")
     query = scope.get("query_string", b"")
     if isinstance(query, bytes):
         query = query.decode()
@@ -97,8 +102,9 @@ def make_gateway_proxy(
 
     ``should_schedule`` (optional, spec 05 §6) is a callable
     ``(method, path) -> bool``: when it returns ``False`` the request is
-    forwarded directly (no intake row, no queue, no demand) — even while the
-    app is stopped. ``None`` (the default) keeps the existing behaviour (every
+    forwarded directly (no intake row, no queue, no demand, never wakes the
+    app); while the app is stopped it is denied immediately (503) without
+    forwarding. ``None`` (the default) keeps the existing behaviour (every
     request goes through the scheduler).
     """
     gateway_id = gateway["id"]
@@ -199,7 +205,7 @@ def make_gateway_proxy(
 
         # Routing (spec 05 §6): a request the application type marks as
         # pass-through is forwarded directly — no intake row, no queue, no
-        # demand — even while the app is stopped.
+        # demand, never wakes the app; denied immediately while it is stopped.
         path = scope.get("path")
         if isinstance(path, bytes):
             path = path.decode()
@@ -266,7 +272,13 @@ def make_gateway_proxy(
         stream = resp.content
 
         async def pump():
-            async for chunk in stream:
+            # iter_chunked = byte-based reads. Plain `async for chunk in stream`
+            # is line-based (StreamReader.__aiter__ -> readline), and readline
+            # raises LineTooLong for any line longer than 2x the client limit
+            # (512KiB default) — which silently truncates bodies that contain
+            # long lines (e.g. base64 blobs, minified JS) and leaves the
+            # chunked response unterminated (ERR_INCOMPLETE_CHUNKED_ENCODING).
+            async for chunk in stream.iter_chunked(64 * 1024):
                 await send(
                     {"type": "http.response.body", "body": chunk, "more_body": True}
                 )
@@ -347,7 +359,12 @@ def make_gateway_proxy(
 
     async def _forward_direct(scope, send, body: bytes, receive):
         """Direct forward (spec 05 §6): pass-through requests (reads, static,
-        websocket) bypass the scheduler — no intake row, no queue, no demand."""
+        websocket) bypass the scheduler — no intake row, no queue, no demand,
+        and they never wake the app. While the app is stopped they are denied
+        immediately instead of being forwarded to an unreachable upstream."""
+        if app_state.get(app_id).process is ProcessState.STOPPED:
+            await _send_error(send, 503, "application stopped")
+            return
         try:
             status, resp = await _forward(scope, send, body, None)
             if resp is not None:
@@ -372,6 +389,14 @@ def make_gateway_proxy(
         method = scope.get("method", "GET")
         headers = _client_headers(scope)
         headers.append(("host", upstream.split("//", 1)[1].split("/", 1)[0]))
+        # Rewrite origin/referer to the upstream's own origin so the app sees a
+        # same-origin request. The browser sends the gateway's origin (e.g.
+        # http://127.0.0.1:38188), which the app rejects as cross-origin (403).
+        # `upstream` has no path, so it is the origin itself.
+        headers = [
+            (k, upstream) if k.lower() in ("origin", "referer") else (k, v)
+            for k, v in headers
+        ]
 
         # NOTE: not `async with` — the response must stay open so the caller can
         # stream the body; the connector releases it after the stream completes.
