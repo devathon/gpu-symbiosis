@@ -5,16 +5,15 @@ explicit import, not duplicated.
 
 from __future__ import annotations
 
-from gpusybio.application_types.llama import LlamaHandler
+from gpusybio.application_types.llama import LLAMA_SPEC, LlamaHandler
 from gpusybio.metrics.type_registry import TypePlugin
-from gpusybio.metrics.typespec import MetricDef, TypeSpec
+from gpusybio.metrics.typespec import TypeSpec
 
-OLLAMA_SPEC = TypeSpec("ollama", [
-    MetricDef("requests", "Total Requests", "counter", "", "handler", "card", "requests",
-              aggregation="sum"),
-    MetricDef("tokens_per_sec", "Tokens t/s", "rate", "", "handler", "card", "rates",
-              aggregation="avg"),
-])
+# Ollama logs the identical llama.cpp per-request lines, so it gets the same
+# token dashboard (input / cached input / output, cache hit %, prompt &
+# generation rates, draft stats, requests) — same spec as ``llama``, built
+# from it so the two never drift apart.
+OLLAMA_SPEC = TypeSpec("ollama", list(LLAMA_SPEC.metrics))
 
 
 def register(registry) -> None:

@@ -31,6 +31,13 @@ def test_loaded_application_types():
     # shipped type modules: each resolves to its module's spec + handler
     assert reg.spec_for("llama") is LLAMA_SPEC
     assert reg.spec_for("ollama") is OLLAMA_SPEC
+    # ollama logs the same llama.cpp lines (shared LlamaHandler), so its
+    # dashboard shows the identical token cards — built from LLAMA_SPEC
+    assert (
+        [m.id for m in reg.spec_for("ollama").metrics]
+        == [m.id for m in LLAMA_SPEC.metrics]
+    )
+    assert "cached_tokens" in [m.id for m in reg.spec_for("ollama").metrics]
     assert reg.spec_for("comfyui") is COMFYUI_SPEC
     assert reg.spec_for("tts") is TTS_SPEC
     assert isinstance(reg.handler_for("llama", None, None, None, {}), LlamaHandler)
