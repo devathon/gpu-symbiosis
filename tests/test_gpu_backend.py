@@ -8,8 +8,10 @@ and convert to MB/s, the same way nvtop does.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import threading
 import time
 from unittest import mock
 
@@ -107,6 +109,41 @@ def test_process_tree_includes_children():
     finally:
         parent.kill()
         parent.wait()
+
+
+def test_process_tree_includes_child_spawned_by_secondary_thread():
+    """ollama topology regression: a multithreaded parent whose worker is
+    spawned from a *non-main* thread (Go runtimes spawn from scheduler
+    threads — ``ollama serve`` launches ``llama-server`` from one of ~20
+    threads, leaving the main thread's children file empty). The child must
+    still be found in the tree, or its VRAM is never attributed.
+
+    The spawning thread must stay alive during the walk: a dead thread's
+    ``task/<tid>/children`` file may be gone; in the live topology the
+    spawner thread persists (Go keeps its M threads)."""
+    holder: dict[str, subprocess.Popen] = {}
+    stop = threading.Event()
+
+    def spawn() -> None:
+        holder["proc"] = subprocess.Popen(["sleep", "30"])
+        stop.wait(timeout=10)  # stay alive like a runtime worker thread
+        holder["proc"].wait()  # reap from the thread that spawned it
+
+    t = threading.Thread(target=spawn, daemon=True)
+    t.start()
+    while "proc" not in holder and not stop.is_set():
+        time.sleep(0.005)
+    if "proc" not in holder:
+        pytest.skip("could not spawn worker thread child in this environment")
+    child = holder["proc"]
+    try:
+        tree = process_tree(os.getpid())
+        assert os.getpid() in tree
+        assert child.pid in tree
+    finally:
+        child.kill()
+        stop.set()
+        t.join(timeout=5)
 
 
 def test_process_tree_edge_cases():
