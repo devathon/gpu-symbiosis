@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from gpusybio.resources.process_tree import process_tree
+
 MB = 1024 * 1024
 
 
@@ -39,10 +41,14 @@ class GpuBackend(Protocol):
     def sample(self) -> GpuSample: ...
 
     def process_memory_mb(self, pid: int | None) -> float:
-        """GPU memory attributed to one PID (0.0 if unknown)."""
+        """GPU memory attributed to a PID *and all its descendant
+        processes* (0.0 if unknown)."""
         ...
 
-    def process_utilization_pct(self, pid: int | None) -> float: ...
+    def process_utilization_pct(self, pid: int | None) -> float:
+        """Compute utilization attributed to a PID *and all its descendant
+        processes* (0.0 if unknown)."""
+        ...
 
     @property
     def supports_process_utilization(self) -> bool:
@@ -222,6 +228,9 @@ class NvmlBackend:
         )
 
     def process_memory_mb(self, pid: int | None) -> float:
+        """GPU memory attributed to the PID and all its descendants
+        (spec 07 §2.2): every compute process in the tree is summed, since
+        children are the ones that usually hold the VRAM."""
         if pid is None:
             return 0.0
         pynvml = self._pynvml
@@ -229,10 +238,12 @@ class NvmlBackend:
             infos = pynvml.nvmlDeviceGetComputeRunningProcesses(self._handle)
         except pynvml.NVMLError:
             return 0.0
+        pids = process_tree(pid)
+        total = 0.0
         for info in infos:
-            if info.pid == pid:
-                return info.usedGpuMemory / MB
-        return 0.0
+            if info.pid in pids:
+                total += info.usedGpuMemory / MB
+        return total
 
     @property
     def supports_process_utilization(self) -> bool:
@@ -266,11 +277,19 @@ class NvmlBackend:
         self._supports_proc_util = True
 
     def process_utilization_pct(self, pid: int | None) -> float:
-        """Per-process compute utilization (SM rate) from the last sample
-        period; 0.0 when the process is idle or unknown."""
+        """Per-process compute utilization (SM rate) across the PID's whole
+        process tree; 0.0 when no process in the tree is busy.
+
+        Children can occupy disjoint SMs simultaneously, so their rates are
+        summed (capped at 100) rather than maxed."""
         if pid is None:
             return 0.0
-        return self._proc_util.get(pid, 0.0)
+        total = 0.0
+        for p in process_tree(pid):
+            u = self._proc_util.get(p)
+            if u:
+                total += u
+        return min(100.0, total)
 
     def set_loaded(self, app_id: str, memory_mb: float) -> None:
         """No-op on real hardware.
