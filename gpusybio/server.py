@@ -10,6 +10,7 @@ leftover processes hold app ports.
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 
@@ -32,6 +33,7 @@ from gpusybio.gateway.request_manager import RequestManager
 from gpusybio.metrics import MetricsCollector
 from gpusybio.resources.gpu import make_backend
 from gpusybio.resources.manager import ResourceManager
+from gpusybio.resources.process_tree import pid_alive
 from gpusybio.scheduler import Scheduler
 from gpusybio.scheduler.idle import IdleUnloader
 from gpusybio.scheduler.residency_monitor import ResidencyMonitor
@@ -140,6 +142,7 @@ class Server:
         self._servers: list[uvicorn.Server] = []
         self.session: ClientSession | None = None
         self._stopped = False
+        self._sigint_pending = False
 
     # -- gateway ASGI apps ----------------------------------------------------
     def _gateway_app(self, gw_id: str):
@@ -208,15 +211,34 @@ class Server:
 
     # -- startup (spec 09 §8) --------------------------------------------------
     def _reconcile(self) -> None:
-        """Fresh start: runtime state is in-memory (all STOPPED/OFF). Verify
-        that no stray process holds an app port (spec 09 §8)."""
+        """Fresh start: runtime state is in-memory (all STOPPED/OFF).
+
+        Re-adopt applications whose process survived a gateway restart
+        (system exit / crash): the recorded PID (pid file) must be alive
+        AND the app port in use — then the app is RUNNING in our state
+        again and the watchdog/metrics/scheduler track it (residency is
+        reconciled by the residency monitor on its next tick). Mismatched
+        cases are warned and the app stays STOPPED.
+        """
         for app_id in self.app_ids:
             cfg = self.apps.config(app_id)
-            if _port_in_use(cfg.port):
+            port = _port_in_use(cfg.port)
+            pid = _read_pid(self.apps.pid_path(app_id))
+            alive = pid is not None and pid_alive(pid)
+            if alive and port:
+                self.states.set_pid(app_id, pid)
+                self.states.set_process(app_id, ProcessState.RUNNING)
+                self.resources.set_pid(app_id, pid)
+                log.info("re-adopted running application",
+                         application_id=app_id, pid=pid, port=cfg.port)
+            elif alive and not port:
+                log.warning("recorded process alive but app port not in use",
+                            application_id=app_id, pid=pid, port=cfg.port)
+            elif port:
                 log.warning(
                     "port already in use at startup",
                     application_id=app_id, port=cfg.port,
-                    detail="a previous instance may still be running; start will fail readiness",
+                    detail="a previous or external instance may still be running; start will fail readiness",
                 )
 
     async def _serve(self, host: str, port: int, app) -> tuple[uvicorn.Server, asyncio.Task]:
@@ -249,6 +271,9 @@ class Server:
 
         # Long-running loops.
         loop = asyncio.get_running_loop()
+        # Ctrl-C (system exit): confirm whether to stop started applications.
+        # add_signal_handler needs a sync callback — schedule the coroutine.
+        loop.add_signal_handler(signal.SIGINT, lambda: asyncio.ensure_future(self._on_sigint()))
         self._tasks.append(asyncio.create_task(self.apps.watchdog_loop(), name="watchdog"))
         self._tasks.append(asyncio.create_task(self.resources.sampling_loop(), name="resources"))
         self.scheduler.start()
@@ -304,12 +329,65 @@ class Server:
             await self.session.close()
         self.engine.dispose()
 
+    # -- system exit (Ctrl-C) ---------------------------------------------------
+    async def _on_sigint(self) -> None:
+        """Ctrl-C: ask whether to stop all started applications (5s timeout,
+        default YES).
+
+        yes → full clean shutdown (applications first), then the gateway
+             exits with code 0 (hard exit — the shutdown is already done,
+             this avoids a CancelledError from the cancelled loop tasks).
+        no  → exit the gateway, leaving the started applications running.
+        No started applications → just shut down, no prompt.
+        """
+        if self._stopped or self._sigint_pending:
+            return
+        self._sigint_pending = True
+        started = [
+            aid for aid in self.app_ids
+            if self.states.get(aid).process is not ProcessState.STOPPED
+        ]
+        stop_apps = await self._confirm_stop(started) if started else True
+        if stop_apps:
+            log.info("ctrl-c: stopping started applications", apps=started)
+            await self.stop()
+        else:
+            log.info("ctrl-c: leaving started applications running", apps=started)
+        os._exit(0)
+
+    async def _confirm_stop(self, started: list[str], timeout_sec: float = 5.0) -> bool:
+        """Terminal prompt: stop all started applications?
+
+        Default YES — an empty or affirmative answer stops them, ``n``/``no``
+        leaves them running, and a timeout, EOF, or non-interactive stdin
+        also stops them (the default).
+        """
+        loop = asyncio.get_running_loop()
+        prompt = f"stop all started applications ({', '.join(started)})? [Y/n] "
+        read = loop.run_in_executor(None, lambda: input(prompt).strip().lower())
+        try:
+            answer = await asyncio.wait_for(asyncio.shield(read), timeout=timeout_sec)
+        except (asyncio.TimeoutError, EOFError, OSError):
+            print(f"\n(no answer within {timeout_sec:g}s — stopping applications)",
+                  file=sys.stderr)
+            return True
+        return answer not in ("n", "no")
+
 
 def _port_in_use(port: int) -> bool:
     import socket
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _read_pid(path: str) -> int | None:
+    """The PID recorded in a pid file, or None if missing/unreadable."""
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
 
 
 def main() -> None:

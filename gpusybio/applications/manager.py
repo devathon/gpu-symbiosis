@@ -35,6 +35,7 @@ from gpusybio.events.bus import (
 )
 from gpusybio.events.log import get_logger
 from gpusybio.resources.manager import ResourceManager
+from gpusybio.resources.process_tree import pid_alive as _pid_alive
 from gpusybio.state import InvalidTransition, StateManager
 
 log = get_logger("appmanager")
@@ -189,6 +190,10 @@ class ApplicationManager:
         if cfg.pid_file:
             return os.path.expanduser(cfg.pid_file)
         return os.path.join(self._data_path, "pids", f"{cfg.id}.pid")
+
+    def pid_path(self, app_id: str) -> str:
+        """The app's pid file path (public — used by startup re-adoption)."""
+        return self._effective_pid_path(self.config(app_id))
 
     def _log_tail(self, path: str, n: int = 500) -> str:
         """The last ``n`` bytes of a log (for start-failure detail, spec 04 §4.1)."""
@@ -571,18 +576,3 @@ class ApplicationManager:
                                        detail=str(data.get("detail", "")) or None))
         except Exception:  # noqa: BLE001 - persistence must never break lifecycle
             pass
-
-
-def _pid_alive(pid: int) -> bool:
-    import os
-
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
-
