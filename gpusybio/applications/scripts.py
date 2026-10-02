@@ -193,6 +193,10 @@ async def run_start_script(
     script (a ``systemctl start`` whose service is a child of PID 1, a server
     started outside the gateway). A dead value is stale either way and is
     ignored.
+
+    The script runs in its **own session** (``start_new_session``): the
+    started app must not share the gateway's foreground process group, or the
+    terminal's Ctrl-C kills it before the user can answer the exit prompt.
     """
     env = {
         **os.environ,
@@ -216,6 +220,13 @@ async def run_start_script(
             env=env,
             stdout=log_fh,
             stderr=log_fh,
+            # Own session + process group (setsid in the child): the app tree
+            # must NOT share the gateway's foreground group, or the terminal's
+            # Ctrl-C (SIGINT to the whole foreground group) kills it the moment
+            # the key is pressed — before the user can answer the "n" prompt.
+            # A systemd service (e.g. ollama) is already in its own session and
+            # survives for the same reason. Stop still works: it signals by PID.
+            start_new_session=True,
         )
     except (OSError, ValueError) as e:
         return StartResult(127, 0, None, f"spawn failed: {e}")  # type: ignore[arg-type]

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import socket
@@ -228,3 +229,35 @@ async def test_ctrl_c_accepted_stops_apps(tmp_path, monkeypatch):
         assert srv.states.get("a1").process is ProcessState.STOPPED
     finally:
         srv.engine.dispose()
+
+
+async def test_serve_gather_survives_concurrent_task_cancellation():
+    """Regression: on the exit path, stop() force-cancels the listener tasks
+    while serve() is still awaiting gather(*tasks). serve()'s gather (no
+    return_exceptions) used to re-raise that CancelledError up to asyncio.run,
+    printing a traceback. It must now swallow it and return cleanly.
+
+    This reproduces the two concurrent drivers on the same task: serve()'s
+    guarded gather and stop()'s cancel+reap.
+    """
+    async def hang() -> None:  # stands in for a uvicorn server task
+        await asyncio.sleep(3600)
+
+    task = asyncio.create_task(hang())
+
+    async def serve_gather() -> None:
+        # The exact pattern in Server.serve().
+        try:
+            await asyncio.gather(task)
+        except asyncio.CancelledError:
+            pass
+
+    async def stop_cancel() -> None:
+        # The tail of Server.stop().
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    serve_task = asyncio.create_task(serve_gather())
+    await asyncio.sleep(0.02)  # let serve_gather reach its gather await
+    await stop_cancel()
+    await serve_task  # completes cleanly; raises CancelledError if the guard is missing

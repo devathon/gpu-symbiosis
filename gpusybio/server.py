@@ -284,6 +284,13 @@ class Server:
         # Wait for all listeners.
         try:
             await asyncio.gather(*self._tasks)
+        except asyncio.CancelledError:
+            # Shutdown: stop() force-cancels the listener tasks once their
+            # graceful shutdown times out. This gather (no return_exceptions)
+            # would re-raise that CancelledError up to asyncio.run and print a
+            # traceback — swallowing it so the main coroutine returns cleanly.
+            # The _on_sigint path hard-exits (os._exit) right after.
+            pass
         finally:
             await self.stop()
 

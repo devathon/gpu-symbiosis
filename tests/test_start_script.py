@@ -369,3 +369,35 @@ async def test_run_start_script_uses_explicit_paths(tmp_path):
     with open(pid) as f:
         assert r.pid == int(f.read().strip())
     _kill(r.pid)
+
+
+# -- session isolation (Ctrl-C safety) ----------------------------------------
+
+async def test_started_app_runs_in_own_session(tmp_path):
+    """The started app must be in its own session AND process group, so the
+    terminal's Ctrl-C (SIGINT delivered to the whole foreground group) does not
+    kill it.
+
+    Without this, answering "n" to the exit prompt is meaningless: the app sits
+    in the gateway's foreground group and dies on the SIGINT the instant the
+    key is pressed — before the prompt is even answered. A systemd service
+    (e.g. ollama) is already in its own session and survives for the same
+    reason. Stop is unaffected: it signals the app by PID, not by group.
+    """
+    log = str(tmp_path / "sess.log")
+    pid_path = str(tmp_path / "sess.pid")
+    r = await run_start_script(
+        f"sleep 30 >/dev/null 2>&1 & echo $! > {pid_path}",
+        app_id="sess1", log_path=log, pid_path=pid_path, grace=5.0,
+    )
+    assert r.error is None
+    app_pid = r.pid
+    assert _alive(app_pid)
+    try:
+        # A different session AND process group than the caller (the gateway):
+        # the app is not in the terminal's foreground group, so Ctrl-C cannot
+        # reach it. Fails if the app is spawned in the caller's group.
+        assert os.getsid(app_pid) != os.getsid(os.getpid())
+        assert os.getpgid(app_pid) != os.getpgid(os.getpid())
+    finally:
+        _kill(app_pid)
