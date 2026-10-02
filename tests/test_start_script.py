@@ -4,6 +4,10 @@
   such as ``systemctl start`` cannot be expected to print the PID.
 - If the pid file is empty/missing, the PID falls back to the spawned script's
   PID (``proc.pid``) — correct for an *attached* script (``exec app``).
+- A *detached* script's ``proc.pid`` is a dead shell, so the pid file's PID is
+  adopted whenever it names a *living* process (freshly written, or a daemon
+  that outlived the script — e.g. a ``systemctl start`` service); a dead value
+  is stale either way.
 - The code never kills the start script on timeout, so both detached and
   attached scripts work.
 - The script's stdout/stderr go to the effective log file.
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 
 from gpusybio.config.models import Config
 from gpusybio.applications.scripts import run_start_script
@@ -157,6 +162,67 @@ async def test_attached_stale_pidfile_overwritten(tmp_path):
     with open(pid) as f:
         assert int(f.read().strip()) == r.pid
     _kill(r.pid)
+
+
+async def test_detached_adopts_live_pid_from_preexisting_file(tmp_path):
+    """Issue: a *detached* script (``systemctl start``) exits without writing
+    a fresh pid file, while the pid file holds the PID of an already-running
+    daemon — a service is a child of PID 1, never of the script's shell, so
+    the file (written by a previous start or the operator) is the only record
+    of it. The living PID is adopted; the dead shell's ``proc.pid`` must not
+    be tracked (it would fire a false PROCESS_DIED)."""
+    import time as _time
+    log = str(tmp_path / "o.log")
+    pid = str(tmp_path / "o.pid")
+    daemon = subprocess.Popen(["sleep", "30"])  # the outliving "service"
+    try:
+        # Pre-seed the pid file with the live daemon's PID, old mtime
+        # (recorded before this start — the script does not rewrite it).
+        with open(pid, "w") as f:
+            f.write(f"{daemon.pid}\n")
+        old = _time.time() - 120
+        os.utime(pid, (old, old))
+        r = await run_start_script(
+            "true",  # detached no-op: exits immediately, writes nothing
+            app_id="o1", log_path=log, pid_path=pid, grace=2.0,
+        )
+        assert r.error is None
+        assert r.exit_code == 0
+        assert r.pid == daemon.pid  # the living daemon, not the dead shell
+        assert _alive(r.pid)
+    finally:
+        daemon.terminate()
+        daemon.wait()
+
+
+async def test_attached_ignores_stale_live_pidfile(tmp_path):
+    """Guard: an *attached* script (exec) starts while the pid file holds a
+    still-living PID from a *previous* run (old mtime). The current app
+    (``proc.pid``) wins — the file is overwritten, the stale value is not
+    tracked (spec 03 §2.5)."""
+    import time as _time
+    log = str(tmp_path / "p.log")
+    pid = str(tmp_path / "p.pid")
+    other = subprocess.Popen(["sleep", "30"])  # a previous instance, still up
+    try:
+        with open(pid, "w") as f:
+            f.write(f"{other.pid}\n")
+        old = _time.time() - 120
+        os.utime(pid, (old, old))
+        r = await run_start_script(
+            "exec sleep 30",
+            app_id="p1", log_path=log, pid_path=pid, grace=2.0,
+        )
+        assert r.exit_code is None
+        assert r.pid != other.pid  # the current app, not the previous one
+        assert _alive(r.pid)
+        # The system overwrote the stale pid file with the current app's PID.
+        with open(pid) as f:
+            assert int(f.read().strip()) == r.pid
+        _kill(r.pid)
+    finally:
+        other.terminate()
+        other.wait()
 
 
 async def test_attached_stdout_lands_in_log(tmp_path):

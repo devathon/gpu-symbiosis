@@ -28,8 +28,10 @@ class StartResult:
 
     ``exit_code`` is ``None`` while the script is still running — an *attached*
     script (``exec app``) never exits, so it must not be killed on timeout.
-    ``pid`` is the resolved application PID: the pid file's contents if
-    non-empty, else the PID of the spawned script (``proc.pid``).
+    ``pid`` is the resolved application PID: for an *attached* script the
+    spawned script itself (``proc.pid``); for a *detached* one the pid file's
+    PID when it names a living process (freshly written, or a still-running
+    daemon such as a systemd service), else ``proc.pid`` (the dead shell).
     """
 
     exit_code: int | None
@@ -179,12 +181,15 @@ async def run_start_script(
     previous run is ignored), then resolve the PID. Detached scripts exit in
     milliseconds; attached scripts hit the grace.
 
-    Resolution: the pid file is trusted only if *fresh* (written by this run).
-    Otherwise it is stale or missing — for an *attached* script the shell
-    exec'd the app, so ``proc.pid`` is the application's PID, and the system
-    writes it into the file so it is the single source of truth for
-    stop/watchdog. A *detached* script that exited without writing the file is
-    left alone (its ``proc.pid`` is a dead shell).
+    Resolution: an *attached* script — the shell exec'd the app, so
+    ``proc.pid`` is the application's PID; the system writes it into the file
+    so the file is the single source of truth for stop/watchdog (spec 03
+    §2.5). A *detached* script's ``proc.pid`` is the shell, already gone — so
+    the file's PID is preferred whenever it names a *living* process: written
+    fresh by this run, or recorded earlier for a daemon that outlived the
+    script (a ``systemctl start`` whose service is a child of PID 1, a server
+    started outside the gateway). A dead value is stale either way and is
+    ignored.
     """
     env = {
         **os.environ,
@@ -221,16 +226,19 @@ async def run_start_script(
             break
         await asyncio.sleep(1.0)
 
-    # The pid file is only trustworthy if it was written *fresh* by this run
-    # (a file left over from a previous run holds a dead PID). A fresh file is
-    # the source of truth (a detached script wrote it). Otherwise the file is
-    # stale or missing: for an *attached* script the shell exec'd the app, so
-    # ``proc.pid`` is the application's PID — write it so the file is the
-    # single source of truth for stop/watchdog (spec 03 §2.5). A *detached*
-    # script that exited without writing the file has a dead-shell
-    # ``proc.pid``; its file is also stale/missing, so there is nothing to do.
-    if _pid_file_is_fresh(pid_path, t_start):
-        pid = _read_pid_file(pid_path) or proc.pid
+    # A fresh file (written by this run) is the source of truth for any
+    # script. For a *detached* script (already exited) ``proc.pid`` is a dead
+    # shell, so the file's PID is also adopted when it names a *living*
+    # process — a daemon that outlived the script (``systemctl start``: the
+    # service is a child of PID 1, never of the shell; a server started
+    # outside the gateway). For an *attached* script the shell exec'd the
+    # app, so ``proc.pid`` is the application's PID — write it so the file is
+    # the single source of truth for stop/watchdog (spec 03 §2.5). A file
+    # value that names a *dead* PID is stale either way and is ignored.
+    file_pid = _read_pid_file(pid_path)
+    fresh = _pid_file_is_fresh(pid_path, t_start)
+    if file_pid is not None and _alive(file_pid) and (fresh or proc.returncode is not None):
+        pid = file_pid
     else:
         pid = proc.pid
         if proc.returncode is None:  # attached: the shell is the app
