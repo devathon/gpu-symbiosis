@@ -16,8 +16,11 @@ def pid_alive(pid: int) -> bool:
     """True if a process with this PID exists (``os.kill(pid, 0)``).
 
     ``PermissionError`` means the process exists but belongs to another
-    user — that still counts as alive.
+    user — that still counts as alive. ``pid <= 0`` is never a valid
+    process (``os.kill(0, sig)`` targets the caller's own process group).
     """
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
         return True

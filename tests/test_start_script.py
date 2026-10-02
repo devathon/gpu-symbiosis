@@ -195,6 +195,60 @@ async def test_detached_adopts_live_pid_from_preexisting_file(tmp_path):
         daemon.wait()
 
 
+async def test_detached_zero_pidfile_not_adopted(tmp_path):
+    """Issue: a *detached* script wrote ``0`` into the pid file (a systemd
+    ``MainPID`` captured before the unit finished activating — ``systemctl
+    show`` right after ``systemctl start``). ``os.kill(0, 0)`` probes the
+    caller's own process group, so a naive liveness check reads 0 as "alive";
+    the resolution must treat 0 as missing and fall back to ``proc.pid``
+    (the dead shell — honestly flagged by the watchdog, not tracked forever).
+    """
+    log = str(tmp_path / "z.log")
+    pid = str(tmp_path / "z.pid")
+    r = await run_start_script(
+        f"echo 0 > {pid}",  # detached: writes 0, exits
+        app_id="z1", log_path=log, pid_path=pid, grace=2.0,
+    )
+    assert r.error is None
+    assert r.exit_code == 0
+    assert r.pid != 0
+    assert not _alive(r.pid)  # the dead shell, not a bogus "alive" 0
+
+
+def test_read_pid_file_ignores_zero(tmp_path):
+    """A pid file holding ``0`` (or only non-positive values) is empty for
+    resolution purposes; the first *positive* PID wins."""
+    from gpusybio.applications.scripts import _read_pid_file
+    p = str(tmp_path / "z.pid")
+    with open(p, "w") as f:
+        f.write("0\n")
+    assert _read_pid_file(p) is None
+    with open(p, "w") as f:
+        f.write("0\n1234\n")
+    assert _read_pid_file(p) == 1234
+    with open(p, "w") as f:
+        f.write("1234\n")
+    assert _read_pid_file(p) == 1234
+
+
+def test_pid_zero_never_alive():
+    """pid <= 0 is never a valid process: os.kill(0, 0) targets the caller's
+    own process group, so it must read as not-alive (and stop must not send
+    signals to it)."""
+    from gpusybio.applications.scripts import _alive
+    from gpusybio.applications.scripts import graceful_stop
+    from gpusybio.resources.process_tree import pid_alive
+    assert not _alive(0)
+    assert not _alive(-1)
+    assert not pid_alive(0)
+    assert not pid_alive(-1)
+    # A real PID still reads alive; graceful_stop refuses pid 0.
+    assert _alive(os.getpid())
+    assert pid_alive(os.getpid())
+    res = asyncio.new_event_loop().run_until_complete(graceful_stop(0))
+    assert res.exit_code == 1
+
+
 async def test_attached_ignores_stale_live_pidfile(tmp_path):
     """Guard: an *attached* script (exec) starts while the pid file holds a
     still-living PID from a *previous* run (old mtime). The current app

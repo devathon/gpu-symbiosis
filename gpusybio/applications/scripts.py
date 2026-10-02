@@ -107,14 +107,17 @@ async def run_script(
 def _read_pid_file(path: str) -> int | None:
     """Read an application PID from a pid file (spec 03 §2.5).
 
-    The first all-digit line wins (pid files are conventionally a single line);
-    returns ``None`` when the file is missing, empty, or has no numeric line.
+    The first *positive* all-digit line wins (pid files are conventionally a
+    single line). A ``0`` is invalid and skipped — e.g. a systemd ``MainPID``
+    captured before the unit activated (``systemctl show`` right after
+    ``systemctl start``). Returns ``None`` when the file is missing, empty, or
+    holds no positive PID.
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if line.isdigit():
+                if line.isdigit() and int(line) > 0:
                     return int(line)
     except OSError:
         return None
@@ -248,6 +251,10 @@ async def run_start_script(
 
 async def graceful_stop(pid: int, timeout: float = 10.0) -> ScriptResult:
     """SIGTERM → wait → SIGKILL (spec 03 §2.2 default stop)."""
+    if pid <= 0:
+        # os.kill(0, sig) signals the caller's OWN process group — never a
+        # valid target here (spec 03 §2.2).
+        return ScriptResult(1, "", "invalid pid", False)
     try:
         # Signal the process directly — no external ``kill`` binary to spawn.
         os.kill(pid, signal.SIGTERM)
@@ -269,6 +276,10 @@ async def graceful_stop(pid: int, timeout: float = 10.0) -> ScriptResult:
 
 
 def _alive(pid: int) -> bool:
+    if pid <= 0:
+        # os.kill(0, 0) probes the caller's OWN process group, not a process
+        # — an invalid target must read as not-alive.
+        return False
     try:
         os.kill(pid, 0)
         return True
