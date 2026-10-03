@@ -20,12 +20,13 @@ import time
 
 import pytest
 
-from gpusybio.applications.lifecycle import ProcessState
+from gpusybio.applications.lifecycle import ProcessState, ResidencyState
 from gpusybio.config.models import ApplicationSpec, Config, GpuSpec, SettingsSpec
 from gpusybio.server import Server
 
 
-def _make_server(tmp_path, port: int, app_id: str = "a1", pid_file: str | None = None) -> Server:
+def _make_server(tmp_path, port: int, app_id: str = "a1", pid_file: str | None = None,
+                 unload_script: str | None = None) -> Server:
     cfg = Config(
         db_path=str(tmp_path / "sys.db"),
         data_path=str(tmp_path / "data"),
@@ -35,6 +36,7 @@ def _make_server(tmp_path, port: int, app_id: str = "a1", pid_file: str | None =
             ApplicationSpec(
                 id=app_id, name=app_id, start_script="echo a1",
                 port=port, gpu_memory_mb=1024, pid_file=pid_file,
+                unload_script=unload_script,
             ),
         ],
         settings=SettingsSpec(gpu=GpuSpec(backend="fake", fake_total_mb=24576)),
@@ -128,6 +130,49 @@ async def test_no_readopt_pid_alive_port_free(tmp_path):
         assert s.pid is None
     finally:
         proc.kill()
+        srv.engine.dispose()
+
+
+async def test_readopt_standalone_server_is_loaded(tmp_path):
+    """A re-adopted standalone server (no load/unload — the process IS the
+    model) is re-adopted LOADED. Its memory monitor is disabled (no threshold),
+    so without this nothing would ever set residency and a request would sit
+    queued waiting for a load that never comes (the scheduler needs LOADED to
+    forward)."""
+    srv = _make_server(tmp_path, 9052)
+    data = str(tmp_path / "data")
+    proc = _spawn_sleep()
+    srv_sock = _bind(9052)
+    _write_default_pid(data, "a1", proc.pid)
+    try:
+        srv._reconcile()
+        s = srv.states.get("a1")
+        assert s.process is ProcessState.RUNNING
+        assert s.residency is ResidencyState.LOADED
+        assert s.loaded_at is not None
+    finally:
+        proc.kill()
+        srv_sock.close()
+        srv.engine.dispose()
+
+
+async def test_readopt_lazy_loading_app_stays_off(tmp_path):
+    """A re-adopted lazy-loading app (has an unload script) is NOT assumed
+    loaded — it may have been unloaded before the restart. Residency stays
+    OFF and the residency monitor reconciles it on its next tick."""
+    srv = _make_server(tmp_path, 9053, unload_script="echo unload")
+    data = str(tmp_path / "data")
+    proc = _spawn_sleep()
+    srv_sock = _bind(9053)
+    _write_default_pid(data, "a1", proc.pid)
+    try:
+        srv._reconcile()
+        s = srv.states.get("a1")
+        assert s.process is ProcessState.RUNNING
+        assert s.residency is ResidencyState.OFF
+    finally:
+        proc.kill()
+        srv_sock.close()
         srv.engine.dispose()
 
 

@@ -10,16 +10,18 @@ leftover processes hold app ports.
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import signal
 import sys
+import time
 
 import uvicorn
 from aiohttp import ClientSession
 
 from gpusybio.api import make_admin_api
 from gpusybio.metrics.type_registry import make_type_registry
-from gpusybio.applications.lifecycle import ProcessState
+from gpusybio.applications.lifecycle import ProcessState, ResidencyState
 from gpusybio.applications.manager import ApplicationManager
 from gpusybio.config.models import Config
 from gpusybio.config.seed import seed_database
@@ -229,8 +231,18 @@ class Server:
                 self.states.set_pid(app_id, pid)
                 self.states.set_process(app_id, ProcessState.RUNNING)
                 self.resources.set_pid(app_id, pid)
+                # A standalone server (no load/unload scripts — the process IS
+                # the model) is loaded the moment it is running, so re-adopt it
+                # LOADED: its memory monitor is disabled (no threshold) and a
+                # request would otherwise sit queued waiting for a load that
+                # never comes. A lazy-loading app (with load/unload) may not be
+                # loaded — leave it OFF and let the residency monitor reconcile.
+                if not cfg.supports_load_unload:
+                    self.states.set_residency(app_id, ResidencyState.LOADED)
+                    self.states.get(app_id).loaded_at = time.time()
                 log.info("re-adopted running application",
-                         application_id=app_id, pid=pid, port=cfg.port)
+                         application_id=app_id, pid=pid, port=cfg.port,
+                         residency=self.states.get(app_id).residency.value)
             elif alive and not port:
                 log.warning("recorded process alive but app port not in use",
                             application_id=app_id, pid=pid, port=cfg.port)
@@ -365,20 +377,122 @@ class Server:
     async def _confirm_stop(self, started: list[str], timeout_sec: float = 5.0) -> bool:
         """Terminal prompt: stop all started applications?
 
-        Default YES — an empty or affirmative answer stops them, ``n``/``no``
-        leaves them running, and a timeout, EOF, or non-interactive stdin
-        also stops them (the default).
+        Default YES — a single Y/y keypress stops them, N/n leaves them running.
+        A timeout, EOF, or non-interactive stdin also stops them (the default).
+        Any other key is rejected and the prompt is repeated.
         """
         loop = asyncio.get_running_loop()
-        prompt = f"stop all started applications ({', '.join(started)})? [Y/n] "
-        read = loop.run_in_executor(None, lambda: input(prompt).strip().lower())
         try:
-            answer = await asyncio.wait_for(asyncio.shield(read), timeout=timeout_sec)
+            return await asyncio.wait_for(
+                asyncio.shield(
+                    loop.run_in_executor(None, _read_confirmation, started, timeout_sec)
+                ),
+                timeout=timeout_sec,
+            )
         except (asyncio.TimeoutError, EOFError, OSError):
-            print(f"\n(no answer within {timeout_sec:g}s — stopping applications)",
-                  file=sys.stderr)
+            sys.stdout.write(
+                f"\n(no answer within {timeout_sec:g}s — stopping applications)\n"
+            )
+            sys.stdout.flush()
             return True
-        return answer not in ("n", "no")
+
+
+def _read_confirmation(started: list[str], timeout_sec: float) -> bool:
+    """Blocking single-keypress confirmation (Y/y = stop, N/n = leave running).
+
+    Runs in a thread executor. On a real terminal it reads a single character
+    in raw mode (no Enter needed); any other key is rejected with a beep and
+    the prompt repeats. A timeout applies to the first accepted keypress and
+    defaults to YES (stop). Non-terminal stdin (no tty / no fileno / EOF)
+    falls back to line-buffered input with the same timeout and default.
+    """
+    import select
+    import termios
+    import tty
+
+    try:
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            return _read_confirmation_fallback(started, timeout_sec)
+    except (AttributeError, OSError, io.UnsupportedOperation):
+        return _read_confirmation_fallback(started, timeout_sec)
+
+    def _timed_out() -> None:
+        sys.stdout.write(f"\n(no answer within {timeout_sec:g}s — stopping applications)\n")
+        sys.stdout.flush()
+
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        prompt = f"stop all started applications ({', '.join(started)})? [Y/n] "
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+
+        start = time.time()
+        while True:
+            remaining = timeout_sec - (time.time() - start)
+            if remaining <= 0:
+                _timed_out()
+                return True
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                _timed_out()
+                return True
+
+            ch = os.read(fd, 1)
+            if not ch:  # EOF
+                sys.stdout.write("\n(no answer — stopping applications)\n")
+                sys.stdout.flush()
+                return True
+            key = ch.decode(errors="replace").lower()
+            if key == "y":
+                sys.stdout.write("\nY — stopping applications\n")
+                sys.stdout.flush()
+                return True
+            if key == "n":
+                sys.stdout.write("\nN — leaving applications running\n")
+                sys.stdout.flush()
+                return False
+            # Reject any other key: beep and wait for the next one.
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+    except (EOFError, OSError):
+        sys.stdout.write("\n(no answer — stopping applications)\n")
+        sys.stdout.flush()
+        return True
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        except OSError:
+            pass
+
+
+def _read_confirmation_fallback(started: list[str], timeout_sec: float) -> bool:
+    """Non-tty fallback: line-buffered ``input()`` on a daemon thread, with a timeout.
+
+    A timeout (thread still blocked) or an empty line defaults to YES (stop);
+    only an explicit ``n``/``no`` declines.
+    """
+    import threading
+
+    prompt = f"stop all started applications ({', '.join(started)})? [Y/n] "
+    answer: list[str | None] = [None]
+
+    def read_input() -> None:
+        try:
+            answer[0] = input(prompt).strip().lower()
+        except (EOFError, OSError):
+            answer[0] = ""
+
+    t = threading.Thread(target=read_input)
+    t.daemon = True
+    t.start()
+    t.join(timeout=timeout_sec)
+    if answer[0] is None:
+        sys.stdout.write(f"\n(no answer within {timeout_sec:g}s — stopping applications)\n")
+        sys.stdout.flush()
+        return True
+    return answer[0] not in ("n", "no")
 
 
 def _port_in_use(port: int) -> bool:
