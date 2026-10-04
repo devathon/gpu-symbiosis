@@ -82,6 +82,14 @@ class Application(Base):
     # (list of metric defs), editable via the API without touching the
     # human-readable description. init_db auto-ALTERs this column in (spec 16).
     metrics: Mapped[str | None] = mapped_column(Text)
+    # The ``shell-command`` type (per-request command runner): execution settings
+    # for the start_script template. The built-in command server reads these via
+    # env (GPUSYB_COMMAND_*), which the start path passes through extra_env.
+    # init_db auto-ALTERs these columns in (spec 16).
+    command_cwd: Mapped[str | None] = mapped_column(Text)
+    command_env: Mapped[str | None] = mapped_column(Text)  # JSON object
+    command_response_mode: Mapped[str] = mapped_column(Text, default="json")
+    command_timeout_sec: Mapped[float | None] = mapped_column(Float)
 
     consecutive_load_failures: Mapped[int] = mapped_column(Integer, default=0)
     faulted_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -280,6 +280,41 @@ def test_supports_load_unload_derived_from_unload_script(tmp_path):
     assert AppConfig.from_row(row).supports_load_unload is False
 
 
+def test_gpu_memory_mb_zero_is_allowed(tmp_path):
+    """A workload that consumes no VRAM (e.g. a CPU-only shell-command) may
+    declare gpu_memory_mb=0 (previously rejected by the ge=1 constraint): the
+    config validates, the seed persists it, and the scheduler treats it as
+    zero-cost (always fits)."""
+    db = _db(tmp_path)
+    cfg = Config(
+        applications=[_app_spec(
+            gpu_memory_mb=0,
+            application_type="shell-command",
+            start_script="echo $name",  # start_script doubles as the template
+        )],
+        gateways=[GatewaySpec(id="gw-a1", name="gw-a1", port=9511, application_id="a1")],
+    )
+    seed_database(db, cfg)
+
+    with db() as s:
+        a = s.get(Application, "a1")
+    assert a.configured_gpu_memory_mb == 0
+    assert a.observed_max_gpu_memory_mb == 0
+    assert a.effective_gpu_memory_mb == 0
+
+    # Zero VRAM is zero-cost: the scheduler always fits it.
+    from gpusybio.config.models import GpuSpec
+    from gpusybio.events.bus import EventBus
+    from gpusybio.resources.gpu import make_backend
+    from gpusybio.resources.manager import ResourceManager
+
+    resources = ResourceManager(
+        backend=make_backend(GpuSpec(backend="fake", fake_total_mb=24576)), bus=EventBus()
+    )
+    assert resources.required_for(0) == 0.0
+    assert resources.fits("a1", 0.0) is True
+
+
 def test_column_drift_migration_backfills_defaults(tmp_path):
     """Schema evolution (spec 16): a DB created before a column was added is
     upgraded in place — ``ALTER TABLE ... ADD COLUMN`` with the model's scalar

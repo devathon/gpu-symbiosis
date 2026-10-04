@@ -43,7 +43,11 @@ class ApplicationSpec(BaseModel):
     name: str
     description: str | None = None
     process_name: str | None = None
-    start_script: str
+    # For the ``shell-command`` type (per-request command runner) this is the
+    # per-request command template — NOT executed as a server: the framework
+    # launches the built-in command server (see manager.start) to run it. For
+    # every other type an empty start script is still an error at start time.
+    start_script: str = ""
     stop_script: str | None = None
     load_script: str | None = None
     unload_script: str | None = None
@@ -63,7 +67,18 @@ class ApplicationSpec(BaseModel):
     # The ``custom`` type's declared metrics (spec 08 §9.6); ignored by other types.
     metrics: list[CustomMetricSpec] | None = None
 
-    gpu_memory_mb: int = Field(ge=1)
+    # The ``shell-command`` type (per-request command runner): execution settings
+    # for the start_script template. The built-in command server reads these via
+    # env (GPUSYB_COMMAND_*), which the start path passes through extra_env.
+    command_cwd: str | None = None
+    command_env: dict | None = None
+    command_response_mode: str = "json"  # json | raw
+    command_timeout_sec: float | None = None
+
+    # 0 is allowed: a workload that does not consume VRAM (e.g. a shell-command
+    # that runs on the CPU) declares no GPU memory requirement, so the scheduler
+    # treats it as zero-cost (always fits).
+    gpu_memory_mb: int = Field(ge=0)
     gpu_usage_pct: float | None = Field(default=None, ge=0, le=100)
     cpu_memory_mb: int | None = Field(default=None, ge=0)
     cpu_usage_pct: float | None = Field(default=None, ge=0, le=100)

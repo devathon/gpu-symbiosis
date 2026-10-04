@@ -19,6 +19,17 @@ from gpusybio.state import StateManager
 from gpusybio.applications.lifecycle import combined_ui_state
 
 
+def _parse_command_env(raw: str | None) -> dict | None:
+    """Parse the ``command_env`` JSON column into a dict (None/invalid → None)."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 class GatewayIn(BaseModel):
     name: str
     port: int
@@ -71,6 +82,11 @@ def _app_view(row: Application, state, resources) -> dict:
         "process_name": row.process_name,
         "application_type": row.application_type,
         "start_script": row.start_script,
+        # The ``shell-command`` type's per-request command runner settings.
+        "command_cwd": row.command_cwd,
+        "command_env": _parse_command_env(row.command_env),
+        "command_response_mode": row.command_response_mode or "json",
+        "command_timeout_sec": row.command_timeout_sec,
         "stop_script": row.stop_script,
         "load_script": row.load_script,
         "unload_script": row.unload_script,
@@ -123,6 +139,23 @@ def _coerce_metrics(value) -> str | None:
         data = value
     if not isinstance(data, (list, dict)):
         raise HTTPException(400, "metrics must be a JSON array or object")
+    return json.dumps(data)
+
+
+def _coerce_command_env(value) -> str | None:
+    """Normalize a client-supplied ``command_env`` (a dict, a JSON string, or
+    None) into the stored JSON-document form (a string), or None when unset."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            data = json.loads(value)
+        except Exception:  # noqa: BLE001
+            raise HTTPException(400, "command_env must be a JSON object")
+    else:
+        data = value
+    if not isinstance(data, dict):
+        raise HTTPException(400, "command_env must be a JSON object")
     return json.dumps(data)
 
 

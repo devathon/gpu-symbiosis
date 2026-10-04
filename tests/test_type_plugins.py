@@ -182,7 +182,7 @@ def test_dropin_broken_module_isolated(tmp_path):
 
 def test_dropin_missing_dir_is_noop(tmp_path):
     reg = make_type_registry(str(tmp_path))  # no plugins dir — no error
-    assert reg.known() == ["comfyui", "generic", "llama", "ollama", "tts"]
+    assert reg.known() == ["comfyui", "generic", "llama", "ollama", "shell-command", "tts"]
 
 
 # -- config gate (spec 04 §8) ----------------------------------------------------

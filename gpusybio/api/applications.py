@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Request
 
 from gpusybio.database.models import Application, Gateway
-from gpusybio.api.views import _app_view, _coerce_metrics, _gw_view
+from gpusybio.api.views import _app_view, _coerce_command_env, _coerce_metrics, _gw_view
 
 
 def register(api, ctx) -> None:
@@ -41,6 +41,8 @@ def register(api, ctx) -> None:
             body = dict(body)
             if "metrics" in body:
                 body["metrics"] = _coerce_metrics(body["metrics"])
+            if "command_env" in body:
+                body["command_env"] = _coerce_command_env(body["command_env"])
             row = Application(id=body["id"], **{k: v for k, v in body.items() if k != "id"})
             # Kept in sync (a cache for direct DB readers); the source of truth
             # is ``unload_script`` — read sites derive the flag from it.
@@ -86,6 +88,8 @@ def register(api, ctx) -> None:
                 if hasattr(row, k) and k not in ("id",):
                     if k == "metrics":
                         v = _coerce_metrics(v)
+                    elif k == "command_env":
+                        v = _coerce_command_env(v)
                     setattr(row, k, v)
             # Kept in sync (a cache for direct DB readers); the source of truth
             # is ``unload_script`` — read sites derive the flag from it.

@@ -114,6 +114,10 @@ def _apply_app_config(row: Application, spec) -> None:
     row.metrics = (
         json.dumps([m.model_dump() for m in spec.metrics]) if spec.metrics else None
     )
+    row.command_cwd = spec.command_cwd
+    row.command_env = json.dumps(spec.command_env) if spec.command_env else None
+    row.command_response_mode = spec.command_response_mode
+    row.command_timeout_sec = spec.command_timeout_sec
     row.enabled = spec.enabled
     if row.observed_max_gpu_memory_mb is None:
         row.observed_max_gpu_memory_mb = spec.gpu_memory_mb

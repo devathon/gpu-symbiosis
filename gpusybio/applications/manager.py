@@ -7,7 +7,9 @@ protects against repeated load failures, and watches for dead processes.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 
@@ -41,6 +43,28 @@ from gpusybio.state import InvalidTransition, StateManager
 log = get_logger("appmanager")
 
 READY_POLL_SEC = 1.0
+
+
+def _parse_command_env(raw: str | None) -> dict | None:
+    """Parse the ``command_env`` JSON column (a flat string→string object) into a
+    dict; None/invalid → None (the command server then uses a minimal env)."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        log.warning("command_env is not valid JSON; ignoring", app_id=None)
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {str(k): str(v) for k, v in parsed.items()}
+
+
+def _shell_command_start_script() -> str:
+    """The B2 default start script for the ``shell-command`` type: launch the
+    built-in command server with the framework's own interpreter (attached, so
+    its PID is the app PID)."""
+    return f"{sys.executable} -m gpusybio.command_server"
 
 
 @dataclass
@@ -80,6 +104,13 @@ class AppConfig:
     # while its per-process VRAM >= this absolute MB threshold and UNLOADED
     # while below it. 0 = auto-detection disabled for this app.
     loaded_gpu_memory_mb: float = 0.0
+    # The ``shell-command`` type (per-request command runner): execution settings
+    # for the start_script template. Passed to the built-in command server via
+    # env (GPUSYB_COMMAND_*) in the start path.
+    command_cwd: str | None = None
+    command_env: dict | None = None
+    command_response_mode: str = "json"
+    command_timeout_sec: float | None = None
     # Measured timings (spec 11 §2.3: auto-calculated; feed switch cost, spec 06 §11).
     startup_time_sec: float | None = None
     load_time_sec: float | None = None
@@ -134,6 +165,10 @@ class AppConfig:
             idle_threshold_gpu_pct=row.idle_threshold_gpu_pct if row.idle_threshold_gpu_pct is not None else 5.0,
             application_type=row.application_type or "custom",
             loaded_gpu_memory_mb=row.loaded_gpu_memory_mb if row.loaded_gpu_memory_mb is not None else 0.0,
+            command_cwd=row.command_cwd,
+            command_env=_parse_command_env(row.command_env),
+            command_response_mode=row.command_response_mode or "json",
+            command_timeout_sec=row.command_timeout_sec,
         )
 
 
@@ -263,14 +298,44 @@ class ApplicationManager:
         await self._emit("START", app_id=app_id)
 
         log_path = self._effective_log_path(cfg)
+        script = cfg.start_script
+        extra_env: dict[str, str] | None = None
+        # The ``shell-command`` type (per-request command runner): the start_script
+        # is the per-request command template — NOT executed as a server. The
+        # framework launches the built-in command server (which runs the template)
+        # and passes it + settings through env (GPUSYB_COMMAND_*).
+        if cfg.application_type == "shell-command":
+            template = cfg.start_script
+            if not template:
+                self._states.set_process(app_id, ProcessState.ERROR)
+                self._states.finish_transition(app_id)
+                await self._emit(
+                    "START_FAILED", app_id=app_id,
+                    detail="shell-command app has no start_script template",
+                )
+                return StartResult(
+                    None, -1, None,
+                    "shell-command app has no start_script template",
+                )
+            script = _shell_command_start_script()
+            extra_env = {"GPUSYB_COMMAND_TEMPLATE": template}
+            if cfg.command_cwd:
+                extra_env["GPUSYB_COMMAND_CWD"] = cfg.command_cwd
+            if cfg.command_env:
+                extra_env["GPUSYB_COMMAND_ENV"] = json.dumps(cfg.command_env)
+            if cfg.command_response_mode and cfg.command_response_mode != "json":
+                extra_env["GPUSYB_COMMAND_RESPONSE_MODE"] = cfg.command_response_mode
+            if cfg.command_timeout_sec is not None:
+                extra_env["GPUSYB_COMMAND_TIMEOUT_SEC"] = str(cfg.command_timeout_sec)
         result = await run_start_script(
-            cfg.start_script,
+            script,
             app_id=app_id,
             port=cfg.port,
             log_path=log_path,
             pid_path=self._effective_pid_path(cfg),
             data_path=self._data_path,
             grace=self._settings.startup.pid_grace_sec,
+            extra_env=extra_env,
         )
         if result.error is not None:
             self._states.set_process(app_id, ProcessState.ERROR)
