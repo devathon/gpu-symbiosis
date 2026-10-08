@@ -7,7 +7,9 @@ export interface AppView {
   description: string | null;
   process_state: string;
   residency_state: string;
-  state: string;
+  // "active" (spec 04 §3): serving a request OR using the GPU. The UI shows a
+  // STARTED app as RUNNING when active, STARTED when not.
+  active: boolean;
   pid: number | null;
   draining: boolean;
   active_requests: number;
@@ -215,6 +217,8 @@ export interface AppMetrics {
   state: {
     process_state: string;
     residency_state: string;
+    active: boolean;
+    supports_load_unload: boolean;
     active_requests: number;
     queued_requests: number;
   };

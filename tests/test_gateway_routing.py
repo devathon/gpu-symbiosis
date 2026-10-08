@@ -65,7 +65,7 @@ def test_pass_through_forwarded_when_app_running():
     running, the same pass-through request is forwarded (not denied). Here it
     only fails with 502 because there is no live upstream, never 503."""
     app_state = StateManager()
-    app_state.set_process("app1", ProcessState.RUNNING)
+    app_state.set_process("app1", ProcessState.STARTED)
     proxy = _make_proxy(app_state, should_schedule=lambda m, p: p.startswith("/api/"))
 
     sent = _drive(proxy, method="GET", path="/index.html")
@@ -119,7 +119,7 @@ def test_origin_referer_rewritten_to_upstream():
     gateway's origin (a different port), which the app rejects as cross-origin
     (403); the other headers pass through untouched."""
     app_state = StateManager()
-    app_state.set_process("app1", ProcessState.RUNNING)
+    app_state.set_process("app1", ProcessState.STARTED)
     captured = {}
 
     class _Resp:
@@ -186,7 +186,7 @@ def test_encoded_slash_forwarded_verbatim():
     raw path and 404s on a literal /). uvicorn exposes the raw form in
     scope["raw_path"] (bytes); forward it verbatim."""
     app_state = StateManager()
-    app_state.set_process("app1", ProcessState.RUNNING)
+    app_state.set_process("app1", ProcessState.STARTED)
     captured = {}
 
     class _Resp:
@@ -266,7 +266,7 @@ def test_stream_pump_survives_body_lines_longer_than_512kib():
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
         app_state = StateManager()
-        app_state.set_process("app1", ProcessState.RUNNING)
+        app_state.set_process("app1", ProcessState.STARTED)
         session = aiohttp.ClientSession()
         try:
             proxy = make_gateway_proxy(

@@ -81,6 +81,10 @@ class Server:
         self.gateway_ids = [g.id for g in gw_rows]
         for app_id in self.app_ids:
             self.apps.load_config(app_id)
+        # Register every app's unload baseline up front (spec 07 §8) so
+        # verify_unloaded works even for apps re-adopted at startup (whose
+        # process survived a restart and never ran the start() path).
+        self.apps.register_unload_baselines()
 
         gw_configs = {
             g.id: {
@@ -180,7 +184,7 @@ class Server:
         probe = socket.socket()
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            probe.bind(("127.0.0.1", port))
+            probe.bind((self.config.host, port))
         except OSError as e:
             raise RuntimeError(f"port {port} is not available") from e
         finally:
@@ -191,7 +195,7 @@ class Server:
         # change (a different socket), so a same-port re-save is never a no-op
         # race here.
         await self._stop_gw_listener(gw_id)
-        self._gw_live[gw_id] = await self._serve("127.0.0.1", port, self._gateway_app(gw_id))
+        self._gw_live[gw_id] = await self._serve(self.config.host, port, self._gateway_app(gw_id))
 
     async def _remove_gateway(self, gw_id: str) -> None:
         """Close a gateway's live listener on deletion."""
@@ -217,7 +221,7 @@ class Server:
 
         Re-adopt applications whose process survived a gateway restart
         (system exit / crash): the recorded PID (pid file) must be alive
-        AND the app port in use — then the app is RUNNING in our state
+        AND the app port in use — then the app is STARTED in our state
         again and the watchdog/metrics/scheduler track it (residency is
         reconciled by the residency monitor on its next tick). Mismatched
         cases are warned and the app stays STOPPED.
@@ -229,7 +233,7 @@ class Server:
             alive = pid is not None and pid_alive(pid)
             if alive and port:
                 self.states.set_pid(app_id, pid)
-                self.states.set_process(app_id, ProcessState.RUNNING)
+                self.states.set_process(app_id, ProcessState.STARTED)
                 self.resources.set_pid(app_id, pid)
                 # A standalone server (no load/unload scripts — the process IS
                 # the model) is loaded the moment it is running, so re-adopt it
@@ -273,10 +277,10 @@ class Server:
         # Gateway ports (spec 05: one port per gateway).
         for gw_id in self.gateway_ids:
             gw = self.request_manager.gateway(gw_id)
-            await self._serve("127.0.0.1", gw["port"], self._gateway_app(gw_id))
+            await self._serve(self.config.host, gw["port"], self._gateway_app(gw_id))
 
-        # Admin API.
-        await self._serve(self.config.admin_host, self.config.admin_port, self.admin_api)
+        # Admin API (admin_host, when set, overrides the shared host).
+        await self._serve(self.config.admin_host or self.config.host, self.config.admin_port, self.admin_api)
 
         # Event observer: persist + SSE push.
         self.bus.observe(self.admin_api.state.observe)

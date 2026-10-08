@@ -16,7 +16,7 @@ async def test_prometheus_endpoint(server):
 
     async def a1_loaded():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(a1_loaded, timeout=30)
     text = await _stream(c, f"http://127.0.0.1:{A1_GW}/generate", {"chunks": 4, "delay": 0.02})
@@ -56,7 +56,7 @@ async def test_prometheus_request_duration(server):
 
     async def a1_loaded():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(a1_loaded, timeout=30)
     text = await _stream(c, f"http://127.0.0.1:{A1_GW}/generate", {"chunks": 6, "delay": 0.03})

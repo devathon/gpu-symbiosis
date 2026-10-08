@@ -30,6 +30,11 @@ export default function App() {
   const [editingGw, setEditingGw] = useState<GwView | null>(null);
   const [keysGw, setKeysGw] = useState<GwView | null>(null);
   const [queueGw, setQueueGw] = useState<GwView | null>(null);
+  // Dashboard-only: each section defaults to showing active items (running apps,
+  // non-idle gateways); its header-row toggle expands to show everything. The
+  // Applications / Gateways pages always show all items (no filtering).
+  const [showAllApps, setShowAllApps] = useState(false);
+  const [showAllGws, setShowAllGws] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
   const [requests, setRequests] = useState<RequestRow[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
@@ -160,9 +165,6 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <span className="text-sm text-zinc-500">
-          {res ? `${(res.used_mb / 1024).toFixed(1)} / ${(res.total_mb / 1024).toFixed(1)} GB` : "connecting…"}
-        </span>
       </header>
 
       {authMode === "checking" && (
@@ -231,17 +233,17 @@ export default function App() {
               </div>
 
               <div className="mb-6 grid gap-4 lg:grid-cols-2">
-                <AppCards apps={apps} act={act} />
-                <GatewayCards gws={gws} act={act} decision={decision} />
+                <AppCards apps={apps} act={act} showAll={showAllApps} onToggle={setShowAllApps} />
+                <GatewayCards gws={gws} act={act} decision={decision} showAll={showAllGws} onToggle={setShowAllGws} />
               </div>
 
-              <div className="mb-6">
-                <MetricsPanel apps={apps.map((a) => ({ id: a.id, name: a.name }))} />
-              </div>
-
-              <div className="grid gap-4 lg:grid-cols-2">
+              <div className="mb-6 grid gap-4 lg:grid-cols-2">
                 <RequestsTable rows={requests} />
                 <EventFeed events={events} />
+              </div>
+
+              <div>
+                <MetricsPanel apps={apps.map((a) => ({ id: a.id, name: a.name }))} />
               </div>
             </>
           )}

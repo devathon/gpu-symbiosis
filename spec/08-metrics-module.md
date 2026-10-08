@@ -278,7 +278,8 @@ the `/api/*` family (which includes `/api/prompt`) and the naked root `/` are
 scheduled, while the frontend static assets, the websocket, and other reads pass
 through directly — denied immediately (503) while the app is stopped and never
 waking it. Edit the array to change routing. The app view also exposes `gpu_utilization_pct` alongside
-`gpu_memory_used_mb` (spec 04 §3 — RUNNING is based on GPU utilization).
+`gpu_memory_used_mb` (spec 04 §3 — the RUNNING display is driven by `active`,
+which reads GPU utilization).
 
 The registry holds no type-specific code: it resolves type → (spec, handler
 factory) from whatever registered itself. The shipped types (`llama`,
@@ -326,7 +327,7 @@ The handler is the type's own recording logic and implements the interface from
 
 ```text
 collect(app) -> {metric_id: value}
-       per sample tick (1 s), only while the app is RUNNING and LOADED;
+       per sample tick (1 s), only while the app is STARTED and LOADED;
        for `llama`/`ollama`, tails the app's log (<data_path>/logs/<id>.log, the
        app's stdout) for the per-request token lines (§5) — the primary source —
        and falls back to polling the app's own JSON endpoint on its port

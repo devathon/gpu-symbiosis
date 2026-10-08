@@ -45,7 +45,7 @@ async def test_llama_token_metrics_from_log(server):
 
     async def a1_ready():
         d = (await c.get(f"{admin}/api/applications/a1")).json()
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(a1_ready, timeout=30)
 
@@ -128,7 +128,7 @@ async def test_pid_and_log_land_at_data_path(server):
 
     async def a2_ready():
         d = (await c.get(f"{admin}/api/applications/a2")).json()
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(a2_ready, timeout=30)
     # the pid and log land at the data-path convention for a2

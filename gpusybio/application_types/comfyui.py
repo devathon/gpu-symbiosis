@@ -72,7 +72,7 @@ class ComfyUIHandler:
     def detect_activity(self, app_id: str) -> bool:
         st = self._states.get(app_id)
         return (
-            st.process is ProcessState.RUNNING
+            st.process is ProcessState.STARTED
             and st.residency is ResidencyState.LOADED
             and self._resources.backend.process_utilization_pct(st.pid)
             > float(self._resources.gpu_activity_threshold_pct)

@@ -104,8 +104,8 @@ Card example:
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Action availability depends on state (e.g. `[Stop]` when RUNNING, `[Load]` when
-RUNNING/OFF, `[Unload]` when LOADED, `[Force Stop]` only after confirmation).
+Action availability depends on state (e.g. `[Stop]` when STARTED, `[Load]` when
+STARTED/OFF, `[Unload]` when LOADED, `[Force Stop]` only after confirmation).
 
 ### 2.2 Status Indicator
 

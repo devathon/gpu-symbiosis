@@ -62,7 +62,7 @@ def _make(states, app_id, bus, app_ids, threshold_mb=0.0):
 
 async def test_loaded_vram_low_marks_unloaded():
     states = StateManager()
-    states.set_process("c1", ProcessState.RUNNING)
+    states.set_process("c1", ProcessState.STARTED)
     states.set_residency("c1", ResidencyState.LOADED)
     states.get("c1").pid = 123
     bus = StubBus()
@@ -77,7 +77,7 @@ async def test_loaded_vram_low_marks_unloaded():
 
 async def test_off_vram_high_marks_loaded():
     states = StateManager()
-    states.set_process("c1", ProcessState.RUNNING)
+    states.set_process("c1", ProcessState.STARTED)
     states.set_residency("c1", ResidencyState.OFF)
     states.get("c1").pid = 123
     bus = StubBus()
@@ -93,7 +93,7 @@ async def test_off_vram_high_marks_loaded():
 async def test_off_vram_at_threshold_marks_loaded():
     """The boundary is inclusive: VRAM exactly at the threshold is loaded."""
     states = StateManager()
-    states.set_process("c1", ProcessState.RUNNING)
+    states.set_process("c1", ProcessState.STARTED)
     states.set_residency("c1", ResidencyState.OFF)
     states.get("c1").pid = 123
     bus = StubBus()
@@ -107,7 +107,7 @@ async def test_off_vram_at_threshold_marks_loaded():
 async def test_loaded_vram_at_threshold_stays():
     """And LOADED at exactly the threshold stays loaded (< is strict)."""
     states = StateManager()
-    states.set_process("c1", ProcessState.RUNNING)
+    states.set_process("c1", ProcessState.STARTED)
     states.set_residency("c1", ResidencyState.LOADED)
     states.get("c1").pid = 123
     bus = StubBus()
@@ -121,7 +121,7 @@ async def test_loaded_vram_at_threshold_stays():
 async def test_threshold_zero_skipped():
     """threshold 0 (the default) disables auto-detection for the app."""
     states = StateManager()
-    states.set_process("c1", ProcessState.RUNNING)
+    states.set_process("c1", ProcessState.STARTED)
     states.set_residency("c1", ResidencyState.OFF)
     states.get("c1").pid = 123
     bus = StubBus()
@@ -136,7 +136,7 @@ async def test_unload_only_app_tracked():
     """The monitor no longer gates on load/unload support: an unload-only
     app (no load script) loads automatically from usage."""
     states = StateManager()
-    states.set_process("c1", ProcessState.RUNNING)
+    states.set_process("c1", ProcessState.STARTED)
     states.set_residency("c1", ResidencyState.OFF)
     states.get("c1").pid = 123
     bus = StubBus()

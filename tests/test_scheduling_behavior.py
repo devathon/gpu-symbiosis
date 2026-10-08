@@ -21,7 +21,9 @@ import pytest
 
 from conftest import (
     A1_GW,
+    A1_PORT,
     A2_GW,
+    A2_PORT,
     ADMIN_PORT,
     _app_state,
     _decisions,
@@ -29,6 +31,7 @@ from conftest import (
     _port_up,
     _stream,
     _wait,
+    build_app_spec,
     make_config,
 )
 from gpusybio.config.models import SchedulerSpec
@@ -60,7 +63,7 @@ async def _a1_resident(c):
 
     async def ready():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(ready, timeout=30)
 
@@ -293,7 +296,7 @@ async def test_admin_start_rejects_overallocation():
 
             # A2 untouched by the rejected transition.
             st2 = await _app_state(c, "a2")
-            assert st2["process_state"] != "RUNNING"
+            assert st2["process_state"] != "STARTED"
     finally:
         await _stop_server(srv, task)
 
@@ -347,5 +350,214 @@ async def test_new_request_queues_during_drain():
             r1 = await new_a1
             assert r1.status_code == 200 and "qwen38" in r1.text
             await a1_task
+    finally:
+        await _stop_server(srv, task)
+
+
+async def test_running_app_is_not_evicted_while_using_gpu():
+    """Never evict a running app (spec 04 §3 / spec 06 §2): a draining victim
+    that is still using the GPU (rolling-average ``is_active``) is NOT switched
+    out, even when a candidate's request is queued. A momentary 0% dip does not
+    release it either — the drain only completes once the app is truly idle."""
+    srv, task = await _start_server(SchedulerSpec(min_residency_sec=0, switch_margin=1))
+    try:
+        async with httpx.AsyncClient() as c:
+            await _a1_resident(c)
+
+            # Hold A1 at 99% GPU (simulating a busy, running app — e.g. ComfyUI
+            # mid-generation) and let the 5 s rolling window build up.
+            backend = srv.resources.backend
+            backend.mark_active("a1", 99.0)
+            await _wait(lambda: _util(c, "a1"), timeout=10)
+
+            # A2 request queued → A1 becomes the drain target.
+            a2_task = asyncio.create_task(
+                c.post(f"http://127.0.0.1:{A2_GW}/generate",
+                       json={"chunks": 30, "delay": 0.25}, timeout=60)
+            )
+
+            # A1 is marked DRAINING (it is active — using the GPU).
+            async def a1_draining():
+                s = await _app_state(c, "a1")
+                return s["draining"] is True
+
+            await _wait(a1_draining, timeout=10)
+
+            # Give the drain-completion check several ticks to (wrongly) fire.
+            # A1 is still using the GPU, so it must stay resident — NOT switched.
+            await asyncio.sleep(4.0)
+            st1 = await _app_state(c, "a1")
+            assert st1["residency_state"] == "LOADED", st1
+            assert st1["draining"] is True, st1
+
+            # No switch to A2 happened (the drain guard held).
+            decisions = await _decisions(c)
+            assert not any(d["decision"] == "switch" for d in decisions), decisions
+
+            # Once A1 truly goes idle (GPU drops and the window drains), the
+            # drain completes and the switch proceeds.
+            backend.mark_idle("a1")
+
+            async def a2_loaded():
+                s = await _app_state(c, "a2")
+                return s["residency_state"] == "LOADED"
+
+            await _wait(a2_loaded, timeout=30)
+            st1b = await _app_state(c, "a1")
+            assert st1b["residency_state"] != "LOADED", st1b
+            r2 = await a2_task
+            assert r2.status_code == 200 and "llama31" in r2.text
+    finally:
+        await _stop_server(srv, task)
+
+
+async def _util(c, app_id):
+    """The app's reported GPU% (the active/RUNNING display signal) — waits until it is high."""
+    s = await _app_state(c, app_id)
+    return (s.get("gpu_utilization_pct") or 0.0) >= 5.0
+
+
+async def test_unload_failure_restores_draining_and_blocks_forward():
+    """
+    Reproduce the comfyui→qwen3827b-lg race (user's exact scenario):
+
+    1. a1 is resident and draining (a2 request queued).
+    2. a1's unload FAILS (unload_script exits non-zero) → a1 stays LOADED.
+    3. The drain-completion check fires; _do_switch aborts (victim VRAM not freed).
+    4. The fix: draining flag is RESTORED (for first 2 failures).
+    5. Next evaluation: resident-first path SKIPS the draining victim → a1's
+       queued request is NOT forwarded, and a2 is NOT loaded on top.
+
+    After 3 consecutive failures, the drain flag is cleared (give-up) to prevent
+    an infinite UNLOAD→UNLOAD_FAILED loop. This is verified in
+    test_unload_failure_gives_up_after_3.
+    """
+    spec = SchedulerSpec(min_residency_sec=0, switch_margin=1)
+    a1_spec = build_app_spec("a1", "qwen38", A1_PORT, loaded=True, gpu_memory_mb=18432)
+    a2_spec = build_app_spec("a2", "llama31", A2_PORT, loaded=True, gpu_memory_mb=12288)
+    a1_spec = a1_spec.model_copy(update={"unload_script": "exit 1"})  # deterministic failure
+
+    srv = Server(make_config(spec, applications=[a1_spec, a2_spec]))
+    task = asyncio.create_task(srv.serve())
+    try:
+        await _wait(lambda: _port_up(ADMIN_PORT), timeout=10)
+        async with httpx.AsyncClient() as c:
+            # Start a1 and wait for LOADED
+            await c.post(f"{ADMIN}/api/applications/a1/start")
+
+            async def a1_ready():
+                d = await _app_state(c, "a1")
+                return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
+            await _wait(a1_ready, timeout=30)
+
+            # Queue a short request for a1, then a request for a2 (makes a1 the drain target)
+            a1_task = asyncio.create_task(
+                c.post(f"http://127.0.0.1:{A1_GW}/generate",
+                       json={"chunks": 3, "delay": 0.05}, timeout=30)
+            )
+            await asyncio.sleep(0.3)
+            a2_task = asyncio.create_task(
+                c.post(f"http://127.0.0.1:{A2_GW}/generate",
+                       json={"chunks": 30, "delay": 0.25}, timeout=60)
+            )
+
+            # a1 becomes DRAINING (drain target for a2)
+            async def a1_draining():
+                d = await _app_state(c, "a1")
+                return d["draining"] is True
+            await _wait(a1_draining, timeout=10)
+
+            # a1's short work finishes → a1 is idle but still DRAINING
+            await a1_task
+            # Wait for ONE reconcile tick (1s cadence) to fire the drain-completion check
+            await asyncio.sleep(0.8)
+
+            # a1 should STILL be draining (restored after abort) and still LOADED
+            st1 = await _app_state(c, "a1")
+            assert st1["residency_state"] == "LOADED", f"a1 should stay LOADED, got {st1}"
+            assert st1["draining"] is True, f"draining flag should be restored after abort, got {st1}"
+            assert st1["active_requests"] == 0, f"a1 should be idle, got {st1}"
+
+            # a2 is NOT loaded on top (candidate path blocked by restored drain)
+            st2 = await _app_state(c, "a2")
+            assert st2["residency_state"] != "LOADED", f"a2 must not load while a1 draining, got {st2}"
+
+            # No new "forwarded" decision for a1 after the abort (resident-first path skips draining apps)
+            decisions = await _decisions(c)
+            forwards = [d for d in decisions if "forwarded" in (d.get("detail") or "")]
+            # Only the initial zero-cost forward (before drain) should exist
+            assert len(forwards) <= 1, f"unexpected forwards after abort: {forwards}"
+
+            # a2's request is still queued (will be served once a1 truly goes idle)
+            a2_task.cancel()
+            try:
+                await a2_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+    finally:
+        await _stop_server(srv, task)
+
+
+async def test_unload_failure_gives_up_after_3():
+    """
+    After 3 consecutive unload failures, the scheduler clears the draining flag
+    to prevent an infinite UNLOAD→UNLOAD_FAILED loop. Once the drain is abandoned,
+    the candidate can be scheduled normally (concurrently if it fits, or by waiting
+    for a real unload).
+    """
+    spec = SchedulerSpec(min_residency_sec=0, switch_margin=1)
+    a1_spec = build_app_spec("a1", "qwen38", A1_PORT, loaded=True, gpu_memory_mb=18432)
+    a2_spec = build_app_spec("a2", "llama31", A2_PORT, loaded=True, gpu_memory_mb=12288)
+    a1_spec = a1_spec.model_copy(update={"unload_script": "exit 1"})
+
+    srv = Server(make_config(spec, applications=[a1_spec, a2_spec]))
+    task = asyncio.create_task(srv.serve())
+    try:
+        await _wait(lambda: _port_up(ADMIN_PORT), timeout=10)
+        async with httpx.AsyncClient() as c:
+            await c.post(f"{ADMIN}/api/applications/a1/start")
+
+            async def a1_ready():
+                d = await _app_state(c, "a1")
+                return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
+            await _wait(a1_ready, timeout=30)
+
+            a1_task = asyncio.create_task(
+                c.post(f"http://127.0.0.1:{A1_GW}/generate",
+                       json={"chunks": 3, "delay": 0.05}, timeout=30)
+            )
+            await asyncio.sleep(0.3)
+            a2_task = asyncio.create_task(
+                c.post(f"http://127.0.0.1:{A2_GW}/generate",
+                       json={"chunks": 30, "delay": 0.25}, timeout=60)
+            )
+
+            async def a1_draining():
+                d = await _app_state(c, "a1")
+                return d["draining"] is True
+            await _wait(a1_draining, timeout=10)
+
+            await a1_task
+            # Wait for 3+ drain-completion checks (~3s at 1s cadence, but mock is faster)
+            await asyncio.sleep(3.5)
+
+            # After 3 failures, drain flag should be cleared (give up)
+            st1 = await _app_state(c, "a1")
+            assert st1["residency_state"] == "LOADED", f"a1 should stay LOADED, got {st1}"
+            # The drain flag is cleared after the 3rd failure. The key is that the
+            # infinite UNLOAD→UNLOAD_FAILED loop stops (no more "unload failed" logs
+            # after the "give up" log).
+
+            # a2 should now be schedulable (concurrently in the mock since VRAM appears freed)
+            st2 = await _app_state(c, "a2")
+            # In the mock, a2 loads concurrently after the give-up. In production,
+            # fits() would check real VRAM and only allow it if a1 truly freed memory.
+            assert st2["residency_state"] == "LOADED", f"a2 should be loaded after give-up, got {st2}"
+
+            a2_task.cancel()
+            try:
+                await a2_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
     finally:
         await _stop_server(srv, task)

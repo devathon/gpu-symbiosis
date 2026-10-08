@@ -82,7 +82,7 @@ class ResidencyMonitor:
         now = time.time()
         for app_id in self._app_ids:
             s = self._states.get(app_id)
-            if s.process is not ProcessState.RUNNING or s.pid is None:
+            if s.process is not ProcessState.STARTED or s.pid is None:
                 continue
             if s.residency in (ResidencyState.LOADING, ResidencyState.UNLOADING):
                 continue  # in a transition

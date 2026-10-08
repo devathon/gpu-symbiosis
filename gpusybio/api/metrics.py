@@ -71,7 +71,7 @@ def register(api, ctx) -> None:
             last = idle_unloader.last_active(app_id)
             idle_for = round(now - last, 1) if last is not None and not active else None
             ok, reason = idle_unloader._can_auto_unload(app_id) if (
-                s.process is ProcessState.RUNNING and s.residency is ResidencyState.LOADED
+                s.process is ProcessState.STARTED and s.residency is ResidencyState.LOADED
             ) else (False, "not loaded")
             out[app_id] = {
                 "active": active,

@@ -244,6 +244,25 @@ class ApplicationManager:
     def state(self, app_id: str):
         return self._states.get(app_id)
 
+    def unloaded_baseline_mb(self, app_id: str) -> float:
+        """VRAM threshold below which the model counts as unloaded (spec 07 §8).
+
+        Uses the app's loaded-memory threshold (residency monitor) when set —
+        VRAM below that means the model is released. Otherwise falls back to a
+        fraction of the effective memory.
+        """
+        cfg = self.config(app_id)
+        if cfg.loaded_gpu_memory_mb > 0:
+            return max(64.0, cfg.loaded_gpu_memory_mb)
+        return max(64.0, cfg.effective_gpu_memory_mb * 0.5)
+
+    def register_unload_baselines(self) -> None:
+        """Register every configured app's unload baseline with the resource
+        manager (spec 07 §8) so ``verify_unloaded`` works whether the app was
+        started here or re-adopted at startup (re-adoption never ran ``start``)."""
+        for app_id in self._configs:
+            self._resources.set_unloaded_baseline(app_id, self.unloaded_baseline_mb(app_id))
+
     # -- readiness (spec 04 §6) --------------------------------------------
     async def _probe_url(self, url: str, method: str, timeout: float) -> bool:
         try:
@@ -356,12 +375,15 @@ class ApplicationManager:
         self._states.set_pid(app_id, pid)
         s.pid = pid
         self._resources.set_pid(app_id, pid)
-        self._resources.set_unloaded_baseline(app_id, max(64.0, cfg.configured_gpu_memory_mb * 0.05))
+        # Register the unload baseline (spec 07 §8): verify_unloaded compares
+        # live VRAM against it. Done here for the start path; register_all at
+        # startup covers the re-adoption path.
+        self._resources.set_unloaded_baseline(app_id, self.unloaded_baseline_mb(app_id))
 
         timeout = self._settings.startup.max_detection_sec
         if await self._wait_ready(cfg, pid, timeout):
             elapsed = time.monotonic() - t0
-            self._states.set_process(app_id, ProcessState.RUNNING)
+            self._states.set_process(app_id, ProcessState.STARTED)
             self._states.set_residency(app_id, ResidencyState.LOADED)
             self._states.get(app_id).loaded_at = time.time()
             self._resources.backend.set_loaded(app_id, cfg.configured_gpu_memory_mb)
@@ -388,7 +410,7 @@ class ApplicationManager:
         except InvalidTransition:
             return None
         s = self._states.get(app_id)
-        if s.process not in (ProcessState.RUNNING, ProcessState.ERROR):
+        if s.process not in (ProcessState.STARTED, ProcessState.ERROR):
             s.clear_transition()
             return None
 
@@ -443,7 +465,7 @@ class ApplicationManager:
         except InvalidTransition:
             return None
         s = self._states.get(app_id)
-        if s.process is not ProcessState.RUNNING or s.residency is not ResidencyState.OFF:
+        if s.process is not ProcessState.STARTED or s.residency is not ResidencyState.OFF:
             s.clear_transition()
             return None
 
@@ -573,7 +595,7 @@ class ApplicationManager:
         while True:
             for app_id, cfg in list(self._configs.items()):
                 s = self._states.get(app_id)
-                if s.process is ProcessState.RUNNING and s.pid is not None:
+                if s.process is ProcessState.STARTED and s.pid is not None:
                     if not _pid_alive(s.pid):
                         await self._process_died(app_id, s.pid)
             await asyncio.sleep(1.0)

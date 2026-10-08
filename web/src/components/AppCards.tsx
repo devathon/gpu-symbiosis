@@ -1,43 +1,68 @@
 import { api, AppView } from "../api";
-import { badge, Btn } from "./badges";
+import { badge, Btn, appDisplayState, appResidencyDisplay, showAppResidency } from "./badges";
 
 export default function AppCards({
   apps,
   act,
   onEdit,
   onDelete,
+  showAll,
+  onToggle,
 }: {
   apps: AppView[];
   act: (fn: () => Promise<void>) => void;
   onEdit?: (a: AppView) => void;
   onDelete?: (a: AppView) => void;
+  /** Dashboard: false → hide stopped apps, true → show all. Undefined (the
+      Applications page) → always show all, no toggle. */
+  showAll?: boolean;
+  onToggle?: (showAll: boolean) => void;
 }) {
   const forceStop = (a: AppView) => {
     if (!window.confirm(`Force-stop ${a.name}? Active requests will be dropped.`)) return;
     act(() => api.appStop(a.id, true));
   };
 
+  // Filter only when the dashboard toggle is present; the Applications page
+  // (no onToggle) always shows every app.
+  const visible = showAll === false ? apps.filter((a) => a.process_state !== "STOPPED") : apps;
+  const hidden = apps.length - visible.length;
+
   return (
     <section className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
-      <h2 className="mb-3 text-xs uppercase tracking-wider text-zinc-500">Applications</h2>
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h2 className="text-xs uppercase tracking-wider text-zinc-500">Applications</h2>
+        {onToggle && (
+          <button
+            onClick={() => onToggle(!showAll)}
+            title={showAll ? "Show active only" : hidden > 0 ? `Show all (${hidden} hidden)` : "Show all"}
+            aria-label={showAll ? "Show active applications only" : "Show all applications"}
+            className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${
+              showAll ? "bg-zinc-700 text-zinc-100" : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            }`}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {showAll ? <path d="m18 15-6-6-6 6" /> : <path d="m6 9 6 6 6-6" />}
+            </svg>
+            {showAll ? "active" : "all"}
+          </button>
+        )}
+      </div>
       <div className="space-y-3">
-        {apps.map((a) => (
+        {visible.map((a) => (
           <div key={a.id} className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="font-medium">{a.name}</span>
-                {/* Combined state (spec 04 §3): RUNNING (busy) is one badge;
-                    idle-but-loaded renders as TWO badges (IDLE + LOADED), both
-                    light amber (#FEF3C7) with dark text; everything else
-                    (IDLE, STOPPED, STARTING, ...) is one. */}
-                {a.state === "IDLE & LOADED" ? (
-                  <>
-                    <span className="rounded bg-[#FEF3C7] px-1.5 py-0.5 text-xs text-zinc-900">IDLE</span>
-                    <span className="rounded bg-[#FEF3C7] px-1.5 py-0.5 text-xs text-zinc-900">LOADED</span>
-                  </>
-                ) : (
-                  badge(a.state)
+                {a.application_type && (
+                  <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">{a.application_type}</span>
                 )}
+                {/* Two independent state machines (spec 04 §2): the process state
+                    (shown as RUNNING when active, STARTED when idle) and the
+                    residency state (shown only when started + load/unload
+                    supported; OFF shown as UNLOADED) each get their own badge. */}
+                {badge(appDisplayState(a.process_state, a.active))}
+                {showAppResidency(a.process_state, a.supports_load_unload) && badge(appResidencyDisplay(a.residency_state))}
                 {a.pinned && <span className="rounded bg-purple-900/60 px-1.5 text-xs text-purple-300">pinned</span>}
                 {a.draining && <span className="rounded bg-amber-900/60 px-1.5 text-xs text-amber-300">draining</span>}
                 {!a.enabled && <span className="rounded bg-zinc-800 px-1.5 text-xs text-zinc-500">disabled</span>}
@@ -50,7 +75,7 @@ export default function AppCards({
               </div>
             </div>
             <div className="flex flex-wrap gap-1.5">
-              {a.process_state === "RUNNING" ? (
+              {a.process_state === "STARTED" ? (
                 <>
                   {/* Load button only when the app HAS a load script; an
                       unload-only app loads automatically from usage (the
@@ -88,7 +113,11 @@ export default function AppCards({
             </div>
           </div>
         ))}
-        {apps.length === 0 && <p className="text-sm text-zinc-600">no applications</p>}
+        {visible.length === 0 && (
+          <p className="text-sm text-zinc-600">
+            {apps.length === 0 ? "no applications" : `all ${apps.length} stopped — show all`}
+          </p>
+        )}
       </div>
     </section>
   );

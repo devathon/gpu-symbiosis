@@ -24,7 +24,7 @@ async def test_simulate_does_not_act(server):
 
     async def a1_loaded():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(a1_loaded, timeout=30)
     # Queue a request to a2's gateway → a2 becomes the candidate (queued, no fit).

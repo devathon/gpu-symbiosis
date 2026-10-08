@@ -1,6 +1,13 @@
 import { RequestRow } from "../api";
 import { badge } from "./badges";
 
+function fmtWhen(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString([], { hour12: false });
+}
+
 export default function RequestsTable({ rows }: { rows: RequestRow[] }) {
   return (
     <section className="max-h-96 overflow-auto rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
@@ -8,7 +15,7 @@ export default function RequestsTable({ rows }: { rows: RequestRow[] }) {
       <table className="w-full text-left text-xs">
         <thead className="text-zinc-500">
           <tr>
-            <th className="pb-2">id</th>
+            <th className="pb-2">received</th>
             <th>gateway</th>
             <th>app</th>
             <th>status</th>
@@ -19,7 +26,7 @@ export default function RequestsTable({ rows }: { rows: RequestRow[] }) {
         <tbody>
           {rows.map((r) => (
             <tr key={r.id} className="border-t border-zinc-800/60">
-              <td className="py-1.5 font-mono text-zinc-400">{r.id.slice(0, 12)}…</td>
+              <td className="py-1.5 font-mono text-zinc-400">{fmtWhen(r.received_at)}</td>
               <td>{r.gateway_id}</td>
               <td>{r.application_id}</td>
               <td>{badge(r.status)}</td>

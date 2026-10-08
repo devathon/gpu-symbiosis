@@ -112,7 +112,7 @@ class ScoringMixin:
 
     def _is_active(self, app_id: str) -> bool:
         """spec 04 §3: the single ``active`` definition — serving a request OR
-        using the GPU. Used by the eviction guard so a RUNNING no-gateway app
+        using the GPU. Used by the eviction guard so a STARTED no-gateway app
         (high GPU utilisation, no request rows) is never evicted mid-work."""
         from gpusybio.scheduler.activity import is_active
 
@@ -140,7 +140,7 @@ class ScoringMixin:
                 continue
             s = self._states.get(app_id)
             if not (
-                s.process is ProcessState.RUNNING and s.residency is ResidencyState.LOADED
+                s.process is ProcessState.STARTED and s.residency is ResidencyState.LOADED
             ):
                 continue
             cfg = self._apps.config(app_id)

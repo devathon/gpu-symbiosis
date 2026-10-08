@@ -147,7 +147,7 @@ class MetricsCollector:
         """Persist the lifetime for active (running) apps — 60 s timer."""
         for app_id in self._app_ids:
             st = self._states.get(app_id)
-            if st.process is ProcessState.RUNNING:
+            if st.process is ProcessState.STARTED:
                 self._persist_lifetime(app_id)
 
     async def _on_app_stopped(self, ev) -> None:
@@ -334,11 +334,19 @@ class MetricsCollector:
 
         values = _merge_metrics(app_sample, type_metrics, request, active_time)
         metrics_view = _metrics_view(spec, values)
+        # The UI shows a STARTED app as RUNNING when active (spec 04 §3); the
+        # metrics card needs the same `active` + load/unload support as the
+        # application view to render its state badges.
+        from gpusybio.scheduler.activity import is_active
+
+        active = is_active(st, self._resources, row.idle_threshold_gpu_pct if row else None)
         return {
             "application_id": app_id,
             "type": app_type,
             "window": window,
             "state": {"process_state": st.process.value, "residency_state": st.residency.value,
+                      "active": active,
+                      "supports_load_unload": bool(row.unload_script) if row else False,
                       "active_requests": st.active_requests,
                       "queued_requests": self._rm.queued_count(app_id)},
             "metrics": metrics_view,

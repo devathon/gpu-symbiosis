@@ -15,7 +15,9 @@ allowed networks
 ```
 
 **Default bind address: `127.0.0.1`** (loopback) rather than `0.0.0.0`, unless
-explicitly configured. Same default for the management API and Web UI.
+explicitly configured via the top-level `host` field (e.g. `host: 0.0.0.0` to
+listen on all interfaces). An optional `admin_host` overrides it for the
+management API / Web UI only. Same loopback default for the admin and gateways.
 
 Per-gateway `allowed_networks` (CIDR list) may further restrict who may reach a
 gateway port when it is bound non-locally.

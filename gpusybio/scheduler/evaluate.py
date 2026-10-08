@@ -70,7 +70,13 @@ class EvaluateMixin:
                 if vs_res.residency is not ResidencyState.LOADED or not vs_res.draining:
                     continue
                 if self._rm.active_count(res) > 0:
-                    continue  # still draining
+                    continue  # still draining (active request)
+                # Never evict a running app: a draining victim is only switched
+                # out once it is truly idle — no active request AND its GPU%
+                # *average* below the activity threshold. A momentary 0% dip
+                # (or a burst between requests) does not release it.
+                if self._is_active(res):
+                    continue  # still running (using the GPU) — wait for it to go idle
                 other = self._pick_candidate(exclude=self._drain_exclude_apps(res))
                 if other is None:
                     if not self._dry_run:
@@ -142,7 +148,7 @@ class EvaluateMixin:
 
             # -- zero-cost path (spec 06 §7/§11): candidate already resident -------
             resident = (
-                s.process is ProcessState.RUNNING and s.residency is ResidencyState.LOADED
+                s.process is ProcessState.STARTED and s.residency is ResidencyState.LOADED
             )
             if resident:
                 if s.draining:
@@ -175,7 +181,7 @@ class EvaluateMixin:
             if self._resources.fits(app_id, required):
                 st = await self._ensure_running_loaded(app_id)
                 ok = (
-                    st.process is ProcessState.RUNNING
+                    st.process is ProcessState.STARTED
                     and st.residency is ResidencyState.LOADED
                 )
                 if ok:
@@ -342,9 +348,9 @@ class EvaluateMixin:
         s = self._states.get(app_id)
         if self._dry_run:
             # what-if: the caller already verified `fits`; report a would-be
-            # RUNNING/LOADED state without touching the real app (spec 15).
+            # STARTED/LOADED state without touching the real app (spec 15).
             return types.SimpleNamespace(
-                process=ProcessState.RUNNING, residency=ResidencyState.LOADED
+                process=ProcessState.STARTED, residency=ResidencyState.LOADED
             )
         if s.process in (ProcessState.STOPPED, ProcessState.ERROR):
             await self._apps.start(app_id)
@@ -358,19 +364,67 @@ class EvaluateMixin:
         """spec 06 §17 graceful switch: unload (drained) → load → ready → drain queue."""
         if self._dry_run:
             return True  # what-if: the switch would succeed, but don't act (spec 15)
-        # release(): unload (keep process) if the victim supports load/unload,
-        # else stop it directly — an app without load/unload scripts cannot be
-        # unloaded, only stopped (both free the victim's VRAM).
-        await self._apps.release(victim.id)
+        await self._release_victim(victim.id)
+        if not await self._verify_victim_vram_freed(victim.id, app_id, trigger):
+            return False
+        # Victim VRAM freed — reset its failure counter before loading candidate.
+        self._states.get(victim.id).drain_failures = 0
+        return await self._load_and_forward_candidate(app_id, trigger)
+
+    async def _release_victim(self, victim_id: str) -> None:
+        """Release the victim's VRAM (unload or stop). Clears the draining flag."""
+        await self._apps.release(victim_id)
         # Evicted → no longer a drain target (spec 06 §2). Without this the
         # victim's stale `draining` flag survives re-load and blocks
         # can_forward_now, starving its own queued requests.
-        self._states.set_draining(victim.id, False)
+        self._states.set_draining(victim_id, False)
+
+    async def _verify_victim_vram_freed(
+        self, victim_id: str, candidate_id: str, trigger: str
+    ) -> bool:
+        """Invariant 1 (spec 07 §8): verify victim VRAM is actually freed.
+        Returns True if freed; False (and handles drain failure logic) if not.
+        """
+        victim_st = self._states.get(victim_id)
+        if victim_st.residency is not ResidencyState.LOADED:
+            return True  # victim successfully unloaded
+
+        # Victim still resident (VRAM not freed) — must keep DRAINING flag.
+        # But if drain failed 3 times, give up and clear the flag.
+        victim_st.drain_failures += 1
+        if victim_st.drain_failures >= 3:
+            self._states.set_draining(victim_id, False)
+            victim_st.drain_failures = 0
+            log.warning(
+                "drain gave up after 3 failures: clearing flag",
+                victim=victim_id,
+                candidate=candidate_id,
+            )
+        else:
+            self._states.set_draining(victim_id, True)
+
+        log.warning(
+            "switch aborted: victim VRAM not freed",
+            victim=victim_id,
+            candidate=candidate_id,
+            drain_failures=victim_st.drain_failures,
+        )
+        await self._emit(
+            "SWITCH_ABORTED",
+            application_id=candidate_id,
+            victim=victim_id,
+            trigger=trigger,
+            reason="victim_vram_not_freed",
+        )
+        return False
+
+    async def _load_and_forward_candidate(self, app_id: str, trigger: str) -> bool:
+        """Load candidate, forward queued requests, emit SWITCH_IN."""
         st = await self._ensure_running_loaded(app_id)
         # (Re)loaded → no longer a drain target either.
         self._states.set_draining(app_id, False)
         ok = (
-            st.process is ProcessState.RUNNING and st.residency is ResidencyState.LOADED
+            st.process is ProcessState.STARTED and st.residency is ResidencyState.LOADED
         )
         if ok:
             self._forward(app_id, self._rm.app_limit(app_id))

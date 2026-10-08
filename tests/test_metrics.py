@@ -344,7 +344,7 @@ def test_active_time_tracking():
 
     states = StateManager()
     s = states.ensure("a1")
-    s.process = ProcessState.RUNNING
+    s.process = ProcessState.STARTED
     s.residency = ResidencyState.LOADED
     s.active_requests = 1
 

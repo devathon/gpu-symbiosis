@@ -58,14 +58,14 @@ async def test_shell_command_start_script_used_as_template(server):
         assert data["stdout"].startswith("hello")
         assert data["timed_out"] is False
 
-        # The app is now RUNNING (started on demand, with the built-in server).
+        # The app is now STARTED (started on demand, with the built-in server).
         async def a1_running():
             st = await _app_state(c, "a1")
-            return st["process_state"] == "RUNNING"
+            return st["process_state"] == "STARTED"
 
         await _wait(a1_running, timeout=15)
         st = await _app_state(c, "a1")
-        assert st["process_state"] == "RUNNING"
+        assert st["process_state"] == "STARTED"
         assert st["residency_state"] == "LOADED"
 
 

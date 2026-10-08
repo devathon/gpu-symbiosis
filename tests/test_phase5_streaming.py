@@ -34,7 +34,7 @@ async def test_websocket_proxy(server):
 
     async def loaded():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(loaded, timeout=30)
 
@@ -70,9 +70,9 @@ async def test_concurrent_multi_app_streaming(server):
         d1 = await _app_state(c, "a1")
         d2 = await _app_state(c, "a2")
         return (
-            d1["process_state"] == "RUNNING"
+            d1["process_state"] == "STARTED"
             and d1["residency_state"] == "LOADED"
-            and d2["process_state"] == "RUNNING"
+            and d2["process_state"] == "STARTED"
             and d2["residency_state"] == "LOADED"
         )
 

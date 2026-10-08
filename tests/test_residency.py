@@ -48,9 +48,9 @@ async def test_two_apps_coexist_and_both_served(server):
         d1 = await _app_state(c, "a1")
         d2 = await _app_state(c, "a2")
         return (
-            d1["process_state"] == "RUNNING"
+            d1["process_state"] == "STARTED"
             and d1["residency_state"] == "LOADED"
-            and d2["process_state"] == "RUNNING"
+            and d2["process_state"] == "STARTED"
             and d2["residency_state"] == "LOADED"
         )
 

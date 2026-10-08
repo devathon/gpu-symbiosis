@@ -151,7 +151,7 @@ class IdleUnloader:
         unloaded: list[str] = []
         for app_id in self._app_ids:
             s = self._states.get(app_id)
-            if not (s.process is ProcessState.RUNNING and s.residency is ResidencyState.LOADED):
+            if not (s.process is ProcessState.STARTED and s.residency is ResidencyState.LOADED):
                 self._last_active.pop(app_id, None)
                 continue
             if s.draining:

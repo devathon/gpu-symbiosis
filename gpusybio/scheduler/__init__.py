@@ -144,7 +144,7 @@ class Scheduler(ScoringMixin, EvaluateMixin):
         return [
             a
             for a in self._app_ids
-            if self._states.get(a).process is ProcessState.RUNNING
+            if self._states.get(a).process is ProcessState.STARTED
             and self._states.get(a).residency is ResidencyState.LOADED
         ]
 

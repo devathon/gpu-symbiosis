@@ -66,6 +66,8 @@ export default function GatewayCards({
   onDelete,
   onKeys,
   onQueue,
+  showAll,
+  onToggle,
 }: {
   gws: GwView[];
   act: (fn: () => Promise<void>) => void;
@@ -74,18 +76,49 @@ export default function GatewayCards({
   onDelete?: (g: GwView) => void;
   onKeys?: (g: GwView) => void;
   onQueue?: (g: GwView) => void;
+  /** Dashboard: false → hide idle/disabled gateways, true → show all. Undefined
+      (the Gateways page) → always show all, no toggle. */
+  showAll?: boolean;
+  onToggle?: (showAll: boolean) => void;
 }) {
+  // The score is only meaningful while the scheduler is actively considering a
+  // switch (a candidate exists); when idle (no_candidate) it is static noise.
+  const switchActive =
+    !!decision && !!decision.decision && decision.decision !== "no_candidate";
+
+  // Filter only when the dashboard toggle is present; the Gateways page (no
+  // onToggle) always shows every gateway.
+  const visible = showAll === false ? gws.filter((g) => g.state !== "IDLE" && g.state !== "DISABLED") : gws;
+  const hidden = gws.length - visible.length;
+
   return (
     <section className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
-      <h2 className="mb-3 text-xs uppercase tracking-wider text-zinc-500">Gateways</h2>
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h2 className="text-xs uppercase tracking-wider text-zinc-500">Gateways</h2>
+        {onToggle && (
+          <button
+            onClick={() => onToggle(!showAll)}
+            title={showAll ? "Show active only" : hidden > 0 ? `Show all (${hidden} hidden)` : "Show all"}
+            aria-label={showAll ? "Show active gateways only" : "Show all gateways"}
+            className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${
+              showAll ? "bg-zinc-700 text-zinc-100" : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            }`}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {showAll ? <path d="m18 15-6-6-6 6" /> : <path d="m6 9 6 6 6-6" />}
+            </svg>
+            {showAll ? "active" : "all"}
+          </button>
+        )}
+      </div>
       <div className="space-y-3">
-        {gws.map((g) => (
+        {visible.map((g) => (
           <div key={g.id} className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-medium">{g.name}</span>
-                {badge(g.state)}
-                <ScoreBadge g={g} decision={decision} />
+                {g.state !== "IDLE" && badge(g.state)}
+                {switchActive && <ScoreBadge g={g} decision={decision} />}
                 {!g.enabled && <span className="rounded bg-zinc-800 px-1.5 text-xs text-zinc-500">disabled</span>}
               </div>
               <div className="mt-1 text-xs text-zinc-500">
@@ -119,7 +152,11 @@ export default function GatewayCards({
             </div>
           </div>
         ))}
-        {gws.length === 0 && <p className="text-sm text-zinc-600">no gateways</p>}
+        {visible.length === 0 && (
+          <p className="text-sm text-zinc-600">
+            {gws.length === 0 ? "no gateways" : `all ${gws.length} idle/disabled — show all`}
+          </p>
+        )}
       </div>
     </section>
   );

@@ -130,6 +130,10 @@ class GpuSpec(BaseModel):
     fake_total_mb: int = 24 * 1024
     memory_reserve_mb: int = 2048
     memory_safety_margin: float = 0.10
+    # Rolling window (seconds) over which the per-app GPU-utilization reading
+    # is averaged (spec 04 §3). A running app can dip to 0% between bursts;
+    # averaging keeps the active/RUNNING display signal stable instead of flapping.
+    utilization_window_sec: float = 5.0
 
 
 class SchedulerSpec(BaseModel):
@@ -193,7 +197,10 @@ class SettingsSpec(BaseModel):
 class Config(BaseModel):
     db_path: str = "gpusybio.db"
     data_path: str | None = None
-    admin_host: str = "127.0.0.1"
+    # The host the admin server and gateways bind to (e.g. "0.0.0.0" to listen
+    # on all interfaces). admin_host, when set, overrides it for the admin only.
+    host: str = "127.0.0.1"
+    admin_host: str | None = None
     admin_port: int = 9130
     settings: SettingsSpec = SettingsSpec()
     applications: list[ApplicationSpec] = []

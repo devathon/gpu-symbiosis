@@ -29,7 +29,7 @@ class _Settings:
 
 def _make_rm() -> RequestManager:
     app_state = StateManager()
-    app_state.set_process("app1", ProcessState.RUNNING)
+    app_state.set_process("app1", ProcessState.STARTED)
     app_state.set_residency("app1", ResidencyState.LOADED)
     return RequestManager(
         app_state, _BrokenDB(), EventBus(), _Settings(),
@@ -91,7 +91,7 @@ def test_cancel_inflight_releases_slot_when_db_is_unavailable():
 
 def _make_rm_gw(gw_limit: int | None, app_limit: int) -> RequestManager:
     app_state = StateManager()
-    app_state.set_process("app1", ProcessState.RUNNING)
+    app_state.set_process("app1", ProcessState.STARTED)
     app_state.set_residency("app1", ResidencyState.LOADED)
     gw = {"id": "gw1", "application_id": "app1", "max_waiting_queue": 50,
           "priority": 1, "max_waiting_time_sec": 300,
@@ -180,7 +180,7 @@ def test_app_pool_capped_across_gateways():
     import asyncio
 
     app_state = StateManager()
-    app_state.set_process("app1", ProcessState.RUNNING)
+    app_state.set_process("app1", ProcessState.STARTED)
     app_state.set_residency("app1", ResidencyState.LOADED)
     rm = RequestManager(
         app_state, _BrokenDB(), EventBus(), _Settings(),

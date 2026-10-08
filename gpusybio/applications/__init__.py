@@ -4,7 +4,6 @@ from gpusybio.applications.lifecycle import (
     ProcessState,
     ResidencyState,
     AppState,
-    combined_ui_state,
     is_valid_combination,
 )
 from gpusybio.applications.scripts import ScriptResult, graceful_stop, run_script
@@ -18,7 +17,6 @@ __all__ = [
     "ProcessState",
     "ResidencyState",
     "ScriptResult",
-    "combined_ui_state",
     "graceful_stop",
     "is_valid_combination",
     "run_script",

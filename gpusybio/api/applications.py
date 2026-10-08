@@ -155,7 +155,7 @@ def register(api, ctx) -> None:
             cfg = apps.config(app_id)
             required = resources.required_for(cfg.configured_gpu_memory_mb, cfg.safety_margin)
             already_resident = (
-                s.process is ProcessState.RUNNING and s.residency is ResidencyState.LOADED
+                s.process is ProcessState.STARTED and s.residency is ResidencyState.LOADED
             )
             if not resources.fits(app_id, required, already_resident=already_resident):
                 raise HTTPException(

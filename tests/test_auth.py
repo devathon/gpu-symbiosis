@@ -23,7 +23,7 @@ async def test_gateway_api_key_enforced(server):
 
     async def a1_loaded():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(a1_loaded, timeout=30)
 

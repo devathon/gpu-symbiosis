@@ -7,6 +7,8 @@ when the backend has no per-process support.
 
 from __future__ import annotations
 
+import time
+
 from gpusybio.events.bus import EventBus
 from gpusybio.resources.gpu import GpuSample
 from gpusybio.resources.manager import ResourceManager
@@ -89,3 +91,59 @@ def test_fake_backend_reports_per_process():
     assert res.app_utilization("a1") == 12.0
     b.mark_idle("a1")
     assert res.app_utilization("a1") == 0.0  # idle, no device-level fallback
+
+
+# -- rolling window (spec 04 §3): robust to a momentary 0% dip -------------
+def test_app_utilization_rolling_average_robust_to_momentary_dip():
+    """A running app that dips to 0% for one sample is still 'active' — the
+    rolling average over the window keeps the signal high (spec 04 §3)."""
+    res, b = _res(supports=True)
+    res.set_pid("a1", 111)
+    b._proc[111] = 99.0
+    for _ in range(5):
+        res.refresh_attribution()
+    assert abs(res.app_utilization("a1") - 99.0) < 1e-6
+    # Now the app dips to 0% for ONE sample (a momentary gap between bursts).
+    b._proc[111] = 0.0
+    res.refresh_attribution()
+    # Rolling avg = (4×99 + 0) / 5 = 79.2 — robust to the dip.
+    assert res.app_utilization("a1") > 5.0  # still above the activity threshold
+
+
+def test_app_utilization_rolling_average_is_mean():
+    """The reading is the mean of the samples in the window."""
+    res, b = _res(supports=True)
+    res.set_pid("a1", 111)
+    for v in (10.0, 30.0, 50.0):
+        b._proc[111] = v
+        res.refresh_attribution()
+    assert abs(res.app_utilization("a1") - 30.0) < 1e-6  # mean of 10, 30, 50
+
+
+def test_app_utilization_window_prunes_old_samples():
+    """Samples older than the window are pruned (a long-ago burst does not keep
+    the app 'active' forever)."""
+    res, b = _res(supports=True)
+    res.set_pid("a1", 111)
+    b._proc[111] = 99.0
+    res.refresh_attribution()
+    # Age the sample past the 5s window.
+    res._util_history["a1"][0] = (time.time() - 10.0, 99.0)
+    b._proc[111] = 0.0
+    res.refresh_attribution()
+    # The old 99% is pruned; the average is just the fresh 0%.
+    assert res.app_utilization("a1") == 0.0
+
+
+def test_app_utilization_configurable_window():
+    """The window is configurable (a shorter window reacts faster)."""
+    res, b = _res(supports=True)
+    res._util_window_sec = 1.0
+    res.set_pid("a1", 111)
+    b._proc[111] = 99.0
+    res.refresh_attribution()
+    # Age the sample 2s (past a 1s window).
+    res._util_history["a1"][0] = (time.time() - 2.0, 99.0)
+    b._proc[111] = 0.0
+    res.refresh_attribution()
+    assert res.app_utilization("a1") == 0.0  # the 99% fell out of the short window

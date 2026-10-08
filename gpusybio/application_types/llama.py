@@ -415,7 +415,7 @@ class LlamaHandler:
         if st.active_requests > 0:
             return True
         return (
-            st.process is ProcessState.RUNNING
+            st.process is ProcessState.STARTED
             and st.residency is ResidencyState.LOADED
             and self._resources.backend.process_utilization_pct(st.pid)
             > float(self._resources.gpu_activity_threshold_pct)

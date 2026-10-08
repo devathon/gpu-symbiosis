@@ -74,9 +74,9 @@ application_gpu_memory = Σ process_gpu_memory
 Process sets are resolved from the tracked root PID plus child discovery (cgroup or
 process-tree walk); attribution is refreshed every metrics interval.
 
-### Per-process GPU utilization (the RUNNING signal)
+### Per-process GPU utilization (the active/RUNNING display signal)
 
-Per-process *compute* utilization — the RUNNING signal (spec 04 §3) — is read with
+Per-process *compute* utilization — the active/RUNNING display signal (spec 04 §3) — is read with
 NVML `nvmlDeviceGetProcessUtilization(device, last_seen_timestamp)`, which returns a
 sample per process that used the GPU since the timestamp:
 `{pid, timeStamp, smUtil, memUtil, encUtil, decUtil}`. The per-process GPU % is

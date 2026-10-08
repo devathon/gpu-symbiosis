@@ -226,7 +226,7 @@ On service start the state manager:
 2. Probes each `enabled` application: does the process exist (PID file / process
    name)? What is its GPU attribution?
 3. Rebuilds process/residency states from observation (an app found running with
-   VRAM is `RUNNING/LOADED`; running without VRAM is `RUNNING/OFF`; else
+   VRAM is `STARTED/LOADED`; running without VRAM is `STARTED/OFF`; else
    `STOPPED/OFF`).
 4. Requeues nothing (requests are not persisted across restarts; clients retry),
    but logs all observed states as events.

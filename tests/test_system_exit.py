@@ -4,7 +4,7 @@
    timeout, default YES. Yes → clean shutdown (apps stopped); no → the
    gateway exits, leaving the started applications running.
 2. On startup, an application whose recorded PID is alive AND whose port
-   is in use is re-adopted as RUNNING (it survived a gateway restart);
+   is in use is re-adopted as STARTED (it survived a gateway restart);
    mismatched cases stay STOPPED.
 """
 
@@ -26,7 +26,7 @@ from gpusybio.server import Server
 
 
 def _make_server(tmp_path, port: int, app_id: str = "a1", pid_file: str | None = None,
-                 unload_script: str | None = None) -> Server:
+                 unload_script: str | None = None, loaded_gpu_memory_mb: float = 0.0) -> Server:
     cfg = Config(
         db_path=str(tmp_path / "sys.db"),
         data_path=str(tmp_path / "data"),
@@ -37,6 +37,7 @@ def _make_server(tmp_path, port: int, app_id: str = "a1", pid_file: str | None =
                 id=app_id, name=app_id, start_script="echo a1",
                 port=port, gpu_memory_mb=1024, pid_file=pid_file,
                 unload_script=unload_script,
+                loaded_gpu_memory_mb=loaded_gpu_memory_mb,
             ),
         ],
         settings=SettingsSpec(gpu=GpuSpec(backend="fake", fake_total_mb=24576)),
@@ -65,7 +66,7 @@ def _write_default_pid(data_path: str, app_id: str, pid: int) -> None:
 # -- startup re-adoption --------------------------------------------------------
 
 async def test_readopt_surviving_app_at_startup(tmp_path):
-    """Recorded PID alive + port in use → the app is RUNNING again."""
+    """Recorded PID alive + port in use → the app is STARTED again."""
     srv = _make_server(tmp_path, 9041)
     data = str(tmp_path / "data")
     proc = _spawn_sleep()
@@ -74,7 +75,7 @@ async def test_readopt_surviving_app_at_startup(tmp_path):
     try:
         srv._reconcile()
         s = srv.states.get("a1")
-        assert s.process is ProcessState.RUNNING
+        assert s.process is ProcessState.STARTED
         assert s.pid == proc.pid
         assert srv.resources._pids.get("a1") == proc.pid
     finally:
@@ -95,7 +96,7 @@ async def test_readopt_via_configured_pid_file(tmp_path):
     try:
         srv._reconcile()
         s = srv.states.get("a1")
-        assert s.process is ProcessState.RUNNING
+        assert s.process is ProcessState.STARTED
         assert s.pid == proc.pid
     finally:
         proc.kill()
@@ -147,7 +148,7 @@ async def test_readopt_standalone_server_is_loaded(tmp_path):
     try:
         srv._reconcile()
         s = srv.states.get("a1")
-        assert s.process is ProcessState.RUNNING
+        assert s.process is ProcessState.STARTED
         assert s.residency is ResidencyState.LOADED
         assert s.loaded_at is not None
     finally:
@@ -168,12 +169,49 @@ async def test_readopt_lazy_loading_app_stays_off(tmp_path):
     try:
         srv._reconcile()
         s = srv.states.get("a1")
-        assert s.process is ProcessState.RUNNING
+        assert s.process is ProcessState.STARTED
         assert s.residency is ResidencyState.OFF
     finally:
         proc.kill()
         srv_sock.close()
         srv.engine.dispose()
+
+
+async def test_readopted_app_has_unload_baseline(tmp_path):
+    """A re-adopted app (survived a restart, never ran start()) must still have
+    its unload baseline registered — else verify_unloaded falls back to the
+    128 MB default and an app with real residual VRAM can never unload
+    (the stuck-at-UNLOADING bug). The baseline is registered at startup,
+    independent of the re-adoption path."""
+    srv = _make_server(tmp_path, 9054, unload_script="echo unload",
+                       loaded_gpu_memory_mb=600.0)
+    # Baseline is registered in __init__ (before any re-adoption).
+    assert srv.resources._unloaded_base.get("a1") == 600.0
+    assert srv.apps.unloaded_baseline_mb("a1") == 600.0
+
+    data = str(tmp_path / "data")
+    proc = _spawn_sleep()
+    srv_sock = _bind(9054)
+    _write_default_pid(data, "a1", proc.pid)
+    try:
+        srv._reconcile()
+        # Re-adoption must not clobber the baseline.
+        assert srv.resources._unloaded_base.get("a1") == 600.0
+    finally:
+        proc.kill()
+        srv_sock.close()
+        srv.engine.dispose()
+
+
+async def test_unload_baseline_falls_back_to_half_effective(tmp_path):
+    """No loaded-memory threshold → baseline is a fraction of the effective
+    memory (max of configured and observed; observed is None on a fresh seed,
+    so effective = configured), not the 128 MB default."""
+    # gpu_memory_mb=1024, observed=None → effective=1024 → baseline=512
+    srv = _make_server(tmp_path, 9055, unload_script="echo unload")
+    assert srv.apps.unloaded_baseline_mb("a1") == 1024 * 0.5
+    assert srv.resources._unloaded_base.get("a1") == 1024 * 0.5
+    srv.engine.dispose()
 
 
 # -- Ctrl-C confirmation (5s timeout, default yes) ------------------------------
@@ -238,10 +276,10 @@ async def test_ctrl_c_no_started_apps_shuts_down_without_prompt(tmp_path, monkey
 
 
 async def test_ctrl_c_declined_leaves_apps_running(tmp_path, monkeypatch):
-    """Answer 'n' → the gateway exits, the started app stays RUNNING."""
+    """Answer 'n' → the gateway exits, the started app stays STARTED."""
     srv = _make_server(tmp_path, 9049)
     try:
-        srv.states.set_process("a1", ProcessState.RUNNING)
+        srv.states.set_process("a1", ProcessState.STARTED)
         monkeypatch.setattr(sys, "stdin", io.StringIO("n\n"))
 
         def hard_exit(code: int):
@@ -251,7 +289,7 @@ async def test_ctrl_c_declined_leaves_apps_running(tmp_path, monkeypatch):
         with pytest.raises(SystemExit):
             await srv._on_sigint()
         assert srv._stopped is False  # no clean shutdown ran
-        assert srv.states.get("a1").process is ProcessState.RUNNING
+        assert srv.states.get("a1").process is ProcessState.STARTED
     finally:
         srv.engine.dispose()
 
@@ -260,7 +298,7 @@ async def test_ctrl_c_accepted_stops_apps(tmp_path, monkeypatch):
     """Answer 'y' → clean shutdown, the app is stopped, exit code 0."""
     srv = _make_server(tmp_path, 9050)
     try:
-        srv.states.set_process("a1", ProcessState.RUNNING)
+        srv.states.set_process("a1", ProcessState.STARTED)
         monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
 
         def hard_exit(code: int):

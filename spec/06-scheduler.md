@@ -385,7 +385,7 @@ active = serving a request (active_requests > 0)
 ```
 
 If **either** is on, the app is active. The scheduler's eviction guard uses this
-so a **RUNNING** no-gateway app (high GPU utilization, no request rows) is never
+so a **STARTED** no-gateway app (high GPU utilization, no request rows) is never
 evicted mid-work — an app that is idle (both signals off) is the only one that
 may be unloaded.
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from dataclasses import dataclass
 
 from gpusybio.events.bus import EventBus, Event, RESOURCE_CHANGE
@@ -36,6 +37,7 @@ class ResourceManager:
         memory_safety_margin: float = 0.10,
         unload_baseline_mb: float = 128.0,
         system: SystemMonitor | None = None,
+        utilization_window_sec: float = 5.0,
     ):
         self._backend = backend
         self._bus = bus
@@ -53,6 +55,11 @@ class ResourceManager:
         self._last_change = 0.0
         # GPU-activity threshold for idle detection (spec 06 §10, default 5%).
         self.gpu_activity_threshold_pct: float = 5.0
+        # Rolling window for the per-app GPU-utilization reading (spec 04 §3).
+        # A running app can dip to 0% for a moment between bursts; averaging the
+        # last N seconds keeps the "active" signal stable instead of flapping.
+        self._util_window_sec = float(utilization_window_sec)
+        self._util_history: dict[str, deque] = {}
 
     # -- properties --------------------------------------------------------
     @property
@@ -102,11 +109,32 @@ class ResourceManager:
         if step is not None:
             step()
         self.sample()
+        now = time.time()
         for app_id, pid in self._pids.items():
             if pid is not None:
                 self._live[app_id] = self._backend.process_memory_mb(pid)
+                # Record a per-process GPU-utilization sample for the rolling
+                # window (spec 04 §3) — only when the backend supports it.
+                if getattr(self._backend, "supports_process_utilization", False):
+                    try:
+                        util = float(self._backend.process_utilization_pct(pid) or 0.0)
+                    except Exception:  # noqa: BLE001
+                        util = 0.0
+                    else:
+                        self._util_history.setdefault(app_id, deque()).append((now, util))
+                        self._prune_util(app_id, now)
             else:
                 self._live[app_id] = 0.0
+                self._util_history.pop(app_id, None)
+
+    def _prune_util(self, app_id: str, now: float) -> None:
+        """Drop utilization samples older than the rolling window."""
+        dq = self._util_history.get(app_id)
+        if not dq:
+            return
+        cutoff = now - self._util_window_sec
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
 
     # -- reservations (spec 07 §6) -----------------------------------------
     def reserve(self, app_id: str, required_mb: float) -> None:
@@ -128,20 +156,29 @@ class ResourceManager:
         return self._live.get(app_id, 0.0)
 
     def app_utilization(self, app_id: str) -> float:
-        """Per-app GPU utilization (spec 04 §3: the RUNNING signal).
+        """Per-app GPU utilization (spec 04 §3: the active/RUNNING display signal).
 
         No PID means no process (stopped) → 0.0, never a device-level proxy
         (which would mis-attribute a co-resident app's load to a stopped one).
-        With a PID: when the backend exposes per-process utilization (NVML
-        ``nvmlDeviceGetProcessUtilization``, or the fake) this is the
-        per-process compute rate — a value of 0.0 means the app is *idle*, so
-        there is deliberately no device-level fallback. Only when the backend
-        has no per-process support is the device-level rate used as a proxy.
+        With a PID and per-process support (NVML
+        ``nvmlDeviceGetProcessUtilization``, or the fake): the *rolling
+        average* over the last ``utilization_window_sec`` (default 5s) —
+        robust to a momentary 0% dip on a still-running app. A value of 0.0
+        means the app is *idle*, so there is deliberately no device-level
+        fallback. Only when the backend has no per-process support is the
+        device-level rate used as a proxy (no rolling window — it is shared).
         """
         pid = self._pids.get(app_id)
         if pid is None:
             return 0.0
         if getattr(self._backend, "supports_process_utilization", False):
+            now = time.time()
+            dq = self._util_history.get(app_id)
+            if dq:
+                samples = [u for (t, u) in dq if now - t <= self._util_window_sec]
+                if samples:
+                    return sum(samples) / len(samples)
+            # No window yet (just started): take a fresh sample.
             try:
                 return float(self._backend.process_utilization_pct(pid) or 0.0)
             except Exception:  # noqa: BLE001
@@ -226,4 +263,5 @@ def make_resource_manager(
         memory_reserve_mb=float(settings.gpu.memory_reserve_mb),
         memory_safety_margin=float(settings.gpu.memory_safety_margin),
         unload_baseline_mb=unload_baseline_mb,
+        utilization_window_sec=float(getattr(settings.gpu, "utilization_window_sec", 5.0)),
     )

@@ -193,8 +193,8 @@ def register(api, ctx) -> None:
         slots = request_manager.queue().clear(gw_id)
         for slot in slots:
             request_manager._forward.pop(slot.request_id, None)
-            request_manager._update_status(slot.request_id, "CANCELLED", completed_at=True,
-                                           error="queue cleared")
+            await request_manager._update_status(slot.request_id, "CANCELLED", completed_at=True,
+                                                error="queue cleared")
         await _audit("clear_queue", actor=_actor(request), detail=gw_id)
         return {"id": gw_id, "cancelled": len(slots)}
 

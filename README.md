@@ -21,6 +21,128 @@ performance, and exposes a web UI for configuration and monitoring.
 - Embedding / reranking servers
 - Other GPU workloads
 
+## Features
+
+- **Resource-residency scheduling** — a scheduler that answers "which request
+  should be served, which applications should be resident, which resident can
+  be evicted" on every tick. Zero-cost resident path, concurrent loading when
+  VRAM allows, victim selection with safe **draining** (in-flight requests are
+  never interrupted; new requests queue but never hold the drain open), minimum
+  residency + switch-margin guards, emergency override, anti-thrash cooldown
+  ([06](spec/06-scheduler.md)).
+- **Gateway & proxy** — one externally exposed port per gateway; raw-ASGI
+  streaming for long responses, SSE and WebSockets; per-gateway queue with
+  priority, max-wait and wait-timeout policies; per-gateway API keys; a live
+  queue inspector with cancel / force-raise
+  ([05](spec/05-gateway-module.md), [12](spec/12-security.md)).
+- **Application lifecycle** — two independent state machines (process:
+  `STOPPED / STARTING / STARTED / STOPPING / ERROR`; residency:
+  `OFF / LOADING / LOADED / UNLOADING`), start/stop/load/unload with per-phase
+  timing, dead-process detection, **re-adoption** of processes that survived a
+  restart, drain semantics and force-stop
+  ([04](spec/04-application-manager.md)).
+- **Resource management** — NVML GPU monitoring, per-process VRAM and
+  compute-utilisation attribution (rolling window), memory reservations with a
+  safety margin, and over-allocation rejection (a manual start/load that
+  doesn't fit alongside the residents returns 409)
+  ([07](spec/07-resource-manager.md), [14](spec/14-invariants.md)).
+- **Idle detection & auto-unload** — a single "active" signal (serving a
+  request **or** GPU utilisation ≥ the per-app threshold); idle residents are
+  auto-unloaded, with hard exclusions (pinned apps, etc.)
+  ([06 §10](spec/06-scheduler.md)).
+- **Application types & plugins** — built-in types (`llama`, `ollama`,
+  `comfyui`, `tts`, `shell-command`, `custom`, `generic`) and first-class
+  drop-in plugins — see [Application-type plugins](#application-type-plugins).
+  The `shell-command` type runs a configured command for every POST request via
+  a built-in command server ([03 §4](spec/03-application-model.md)).
+- **Metrics & history** — 1 s sampling, EWMA demand, latency percentiles,
+  per-type metrics declared by a `TypeSpec`, lifetime and per-request metrics,
+  retention & aggregation, and a Prometheus endpoint
+  (`GET /api/metrics/prometheus`)
+  ([08](spec/08-metrics-module.md), [13](spec/13-observability.md)).
+- **Web dashboard** — live applications / gateways / requests / event log /
+  per-app metrics; sections default to active-only with a per-section
+  show-all toggle; independent process and residency badges (a started app
+  shows RUNNING when active, STARTED when idle; residency OFF is shown as
+  UNLOADED and hidden when load/unload is unsupported); per-gateway scheduler
+  score breakdown; live SSE event stream; application and gateway management
+  ([11](spec/11-web-ui.md)).
+- **REST API** — full admin surface: applications, gateways, requests, events,
+  auth, status and metrics ([10](spec/10-api.md)).
+- **Security** — loopback bind by default (configurable via the top-level
+  `host` field, e.g. `host: 0.0.0.0`; an optional `admin_host` overrides it
+  for the admin only), gateway API keys, hashed admin credentials with session
+  + CSRF ([12](spec/12-security.md)).
+- **Observability** — structured logs, every scheduler decision logged with
+  its inputs and outcome, persisted event history
+  ([13](spec/13-observability.md)).
+
+## Application-type plugins
+
+A new application type is a **single `.py` file** you drop into
+`<data_path>/plugins/` — no config change, no core code change, no build step.
+Restart the server and the type is registered; the UI's type dropdown
+(`GET /api/application-types`) picks it up automatically, and the user just
+selects it for their application. Shipped types and community drop-ins use the
+**exact same contract** (spec 04 §8).
+
+A plugin module exposes `register(registry)` — or a module-level
+`PLUGIN = TypePlugin(...)` — where a `TypePlugin` pairs a `TypeSpec` (what is
+recorded and displayed) with a **handler factory** of the unified signature
+`(resources, states, request_metrics, base_urls, session=None,
+log_paths=None) -> handler`:
+
+```python
+# <data_path>/plugins/mytype.py
+from gpusybio.metrics.type_registry import TypePlugin
+from gpusybio.metrics.typespec import TypeSpec, MetricDef
+
+SPEC = TypeSpec("mytype", [
+    MetricDef(id="tokens", name="Tokens", unit="tok/s", kind="gauge",
+              group="throughput"),
+])
+
+class MyHandler:
+    def __init__(self, resources, states, request_metrics, base_urls,
+                 session=None, log_paths=None):
+        self.base_urls = base_urls   # app id -> http://127.0.0.1:<port>
+        self.log_paths = log_paths   # app id -> log file path
+
+    def collect_metrics(self, app_id):      # required — called each 1 s tick
+        return {"tokens": 42.0}             # while the app is STARTED/LOADED
+
+def register(registry):
+    registry.register(TypePlugin("mytype", SPEC, MyHandler))
+```
+
+What the platform provides for free:
+
+- **Recording & display** — the spec's fields are sampled, aggregated and
+  auto-rendered on the metrics card; no dashboard code.
+- **Gateway routing** — optional `scheduled_patterns` on the spec decide which
+  request paths wake the app vs. pass through
+  ([05 §6](spec/05-gateway-module.md)).
+- **Request metrics** — optional `get_request_metrics(app_id)` from the
+  gateway's request records.
+- **Activity interpretation** — optional `detect_activity(app_id)`.
+- **Log tailing** — optional `tailer(app_id)` for lifetime metrics from the
+  app log (how the `llama` type parses token stats).
+- **Fallback safety** — an unknown type falls back to the `generic` handler,
+  so an app always works even with a broken or missing type.
+
+Loading at server start: `generic` (unshadowable) → shipped types → drop-ins.
+First-registered name wins; each module is exception-isolated — a broken
+plugin is logged and skipped, never stops startup.
+
+Community authors should know: single `.py` files only (no packages), imports
+limited to what is already installed in the server's venv, a restart is
+required after adding, and a plugin executes in the admin process with full
+privileges (same trust level as your config and scripts —
+[12](spec/12-security.md)).
+
+Full reference, a complete example, and the no-code `custom` type:
+[docs/application-type-plugins.md](docs/application-type-plugins.md).
+
 ## Specification Modules
 
 This repository holds the functional and technical specification, organised module-wise.
@@ -134,6 +256,10 @@ endpoints with a fake GPU backend.
 # Python (uv) — run the orchestrator with a config file (see spec/10 §6):
 uv run python devrun.py            # dev config with mock GPU apps
 # or:  uv run python -m gpusybio.server --config config.yaml
+
+# Listen on all interfaces (default binds 127.0.0.1):
+#   in config.yaml add:  host: 0.0.0.0
+#   (optional) admin_host: 127.0.0.1   # keep the admin UI loopback-only
 
 # Web UI (optional):
 cd web && npm install && npm run build

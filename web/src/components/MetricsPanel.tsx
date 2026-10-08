@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from "react";
 import { api, AppMetrics, MetricItem } from "../api";
-import { badge } from "./badges";
+import { badge, appDisplayState, appResidencyDisplay, showAppResidency } from "./badges";
 
 // Per-application metrics card. Rendered from the type's spec view (spec 08
 // §9): groups in first-appearance order, one tile per field — the
@@ -93,11 +93,16 @@ function AppMetricsCard({
 
   return (
     <div className="rounded border border-zinc-800 bg-zinc-950/40 p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm font-medium text-zinc-200">{app.name}</span>
-        <span className="flex items-center gap-1.5 text-xs">
-          {badge(state.residency_state)}
-          <span className="text-zinc-500">{m.type}</span>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-2 text-sm">
+          <span className="truncate font-medium text-zinc-200">{app.name}</span>
+          {m.type && (
+            <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">{m.type}</span>
+          )}
+        </span>
+        <span className="flex shrink-0 items-center gap-1.5 text-xs">
+          {badge(appDisplayState(state.process_state, state.active))}
+          {showAppResidency(state.process_state, state.supports_load_unload) && badge(appResidencyDisplay(state.residency_state))}
         </span>
       </div>
       <div className="grid grid-cols-3 gap-2 text-xs">

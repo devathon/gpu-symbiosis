@@ -25,10 +25,13 @@ into one state:
 ```text
 STOPPED
 STARTING
-RUNNING
+STARTED
 STOPPING
 ERROR
 ```
+
+`STARTED` means the process is up. Whether the app is *active* (serving / using the
+GPU) is a separate concern — see §3.
 
 ### 2.2 Residency State
 
@@ -42,7 +45,7 @@ UNLOADING
 The combination is meaningful — for example:
 
 ```text
-Process = RUNNING,  Residency = OFF
+Process = STARTED,  Residency = OFF
 → the application process exists but its model/resources are unloaded
 ```
 
@@ -52,32 +55,30 @@ Process = RUNNING,  Residency = OFF
 | --- | --- | --- | --- | --- |
 | STOPPED | ✓ | — | — | — |
 | STARTING | ✓ | ✓ | — | — |
-| RUNNING | ✓ | ✓ | ✓ | ✓ |
+| STARTED | ✓ | ✓ | ✓ | ✓ |
 | STOPPING | ✓ | — | — | — |
 | ERROR | ✓ (cleanup) | ✓ (abort) | ✓ (abort) | ✓ (abort) |
 
 Invariant 3 ([14-invariants.md](14-invariants.md)): only **one lifecycle transition
 per application** may be in flight at a time — `LOADING` can never overlap `UNLOADING`.
 
-## 3. Combined UI State
+## 3. UI Display States
 
-The UI exposes a simplified projection. The steady states are **four**; the
-transient states are shown only while a transition is in flight.
+The API sends the raw `process_state`, `residency_state`, and the `active` flag
+(spec 06 §10). The UI derives the displayed badges — there is no combined state:
+
+- **Process badge** — a `STARTED` app is shown as `RUNNING` when `active`, and
+  `STARTED` when not. Other states pass through unchanged:
+  `STOPPED` / `STARTING` / `STOPPING` / `ERROR`.
+- **Residency badge** — shown only when the app is `STARTED` **and** supports
+  load/unload (apps without load/unload keep residency `OFF`, so the badge would
+  be pure noise). `OFF` is shown as `UNLOADED`; `LOADED` / `LOADING` /
+  `UNLOADING` pass through unchanged.
 
 ```text
-STOPPED
-IDLE
-IDLE & LOADED
-RUNNING
-
-(transients) STARTING  LOADING  UNLOADING  DRAINING  STOPPING  ERROR
+process badge:  STOPPED | STARTING | STARTED | RUNNING | STOPPING | ERROR
+residency badge: UNLOADED | LOADING | LOADED | UNLOADING   (hidden when not started or no load/unload)
 ```
-
-Where the three distinct steady states for an up app are:
-
-- **STARTED** (process up, model not loaded) → shown as `IDLE`
-- **LOADED** (model resident, not active) → shown as `IDLE & LOADED`
-- **RUNNING** (active) → shown as `RUNNING`
 
 `active` (spec 06 §10) is the single "is the app doing work" signal, computed
 once and consumed by the display, the scheduler, and the idle-unloader:
@@ -86,15 +87,13 @@ once and consumed by the display, the scheduler, and the idle-unloader:
 active = serving a request (active_requests > 0)  OR  using the GPU (utilization >= threshold)
 ```
 
-so **if either is on, the app is active**. `active` drives the `RUNNING` state
-(RUNNING is based on GPU utilization; LOADED is based on VRAM / residency).
-`DRAINING` = active, no new requests accepted, `active_requests` draining toward 0.
+so **if either is on, the app is active**. `active` drives the `RUNNING` display
+(a `STARTED` app shown as `RUNNING`); residency (`LOADED`) is based on VRAM.
+`draining` is a separate behavioural flag (blocks new forwards, drives drain
+completion) and is shown as its own badge when set.
 
-Apps that do not support load/unload omit the `LOADED` state (their residency is
-always OFF): they show only `STOPPED` / `IDLE` / `RUNNING`.
-
-Internally, process and residency states remain separate; `combined_ui_state`
-projects them plus the `active` flag into the display states above.
+Internally, process and residency states remain separate (two state machines, §2);
+the display derivation above lives in the UI, not the backend.
 
 ## 4. Lifecycle Operations
 
@@ -113,7 +112,7 @@ projects them plus the `active` flag into the display states above.
 5. If the start script exited non-zero: Process = ERROR, error = START_FAILED
    (detail from the log tail)
 6. Poll readiness (see §6) every 1 s
-7. On ready:  Process = RUNNING, Residency = LOADED
+7. On ready:  Process = STARTED, Residency = LOADED
               startup_time = readiness_time - T0
 8. On 60 s timeout: Process = ERROR, error = STARTUP_TIMEOUT; best-effort
    graceful stop of the resolved PID
@@ -143,7 +142,7 @@ administrative emergencies and is logged as such.
 ### 4.3 Load
 
 ```text
-1. Validate: Process = RUNNING, Residency = OFF (or STOPPED with start/load fallback)
+1. Validate: Process = STARTED, Residency = OFF (or STOPPED with start/load fallback)
 2. Reserve required VRAM with Resource Manager (see 07 §6)
 3. Set Residency = LOADING
 4. T0 = load script begins
@@ -305,7 +304,7 @@ Handler factory signature (unified — every handler, shipped type and drop-in):
 ```
 
 Handler interface: `collect_metrics(app_id)` is the only required method
-(called each 1 s tick while the app is RUNNING/LOADED). Optional:
+(called each 1 s tick while the app is STARTED/LOADED). Optional:
 `get_request_metrics(app_id)` (per-request metrics from the gateway's request
 records), `detect_activity(app_id)`, and `tailer(app_id)` — a log tailer
 (any object with `read()` / `state()` / `seed()`; the tailer is

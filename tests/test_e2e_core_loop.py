@@ -45,18 +45,18 @@ async def test_core_loop(server):
 
         async def a1_ready():
             d = await _app_state(c, "a1")
-            return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+            return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
         await _wait(a1_ready, timeout=30)
 
-        # A1 must be RUNNING/LOADED and holding ~18 GB.
+        # A1 must be STARTED/LOADED and holding ~18 GB.
         async def a1_resident():
             d = await _app_state(c, "a1")
             return d["gpu_memory_used_mb"] > 18000
 
         await _wait(a1_resident, timeout=10)
         st = await _app_state(c, "a1")
-        assert st["process_state"] == "RUNNING"
+        assert st["process_state"] == "STARTED"
         assert st["residency_state"] == "LOADED"
         assert st["gpu_memory_used_mb"] > 18000
 
@@ -76,7 +76,7 @@ async def test_core_loop(server):
 
         # 3. After the switch: A2 resident, A1 unloaded.
         st2 = await _app_state(c, "a2")
-        assert st2["process_state"] == "RUNNING"
+        assert st2["process_state"] == "STARTED"
         assert st2["residency_state"] == "LOADED"
         st1 = await _app_state(c, "a1")
         assert st1["residency_state"] == "OFF", st1

@@ -4,7 +4,7 @@ A stopped ``shell-command`` app (no start script - the framework launches the
 built-in command server) is woken on demand by a POST request through its
 gateway: the VRAM check fits, the command server starts, the request is
 forwarded and the command runs, and the JSON result is returned. The app is then
-RUNNING (started with no operator script) and goes through the regular idle
+STARTED (started with no operator script) and goes through the regular idle
 lifecycle. (The command runs on POST only; other methods are 405.)
 """
 
@@ -57,14 +57,14 @@ async def test_shell_command_woken_on_demand_and_runs_command(server):
         assert data["stdout"].startswith("hello")
         assert data["timed_out"] is False
 
-        # The app is now RUNNING (started on demand, with no operator script).
+        # The app is now STARTED (started on demand, with no operator script).
         async def a1_running():
             st = await _app_state(c, "a1")
-            return st["process_state"] == "RUNNING"
+            return st["process_state"] == "STARTED"
 
         await _wait(a1_running, timeout=15)
         st = await _app_state(c, "a1")
-        assert st["process_state"] == "RUNNING"
+        assert st["process_state"] == "STARTED"
         assert st["residency_state"] == "LOADED"
 
         # No unload script -> stop-based lifecycle (spec: supports_load_unload is
@@ -89,7 +89,7 @@ async def test_shell_command_second_request_reuses_running_app(server):
         assert r2.json()["stdout"].startswith("second")
 
         st = await _app_state(c, "a1")
-        assert st["process_state"] == "RUNNING"
+        assert st["process_state"] == "STARTED"
 
 
 async def test_shell_command_missing_param_is_400_through_gateway(server):

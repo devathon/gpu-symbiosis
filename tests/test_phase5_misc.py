@@ -29,7 +29,7 @@ async def test_pinned_app_excluded_from_unload(server):
 
     async def a1_loaded():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(a1_loaded, timeout=30)
     victim, reason = server.scheduler._select_victim(exclude="a2")
@@ -50,7 +50,7 @@ async def test_cancel_queued_request(server):
 
     async def a1_loaded():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(a1_loaded, timeout=30)
     # max_concurrent_requests=1: a long request occupies the slot, a second queues.
@@ -92,7 +92,7 @@ async def test_cancel_processing_request(server):
 
     async def a1_loaded():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(a1_loaded, timeout=30)
     # Start a long request in the background (it becomes ACTIVE/processing).
@@ -119,20 +119,20 @@ async def test_load_failure_recovery(server):
     c = httpx.AsyncClient()
     admin = f"http://127.0.0.1:{ADMIN_PORT}"
     mgr = server.apps
-    # Start a1 (mock starts --start-loaded → RUNNING/LOADED), then unload → OFF
+    # Start a1 (mock starts --start-loaded → STARTED/LOADED), then unload → OFF
     # so that load() is eligible (it requires residency OFF).
     await c.post(f"{admin}/api/applications/a1/start")
 
     async def a1_loaded():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "LOADED"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "LOADED"
 
     await _wait(a1_loaded, timeout=30)
     await c.post(f"{admin}/api/applications/a1/unload")
 
     async def a1_off():
         d = await _app_state(c, "a1")
-        return d["process_state"] == "RUNNING" and d["residency_state"] == "OFF"
+        return d["process_state"] == "STARTED" and d["residency_state"] == "OFF"
 
     await _wait(a1_off, timeout=30)
 

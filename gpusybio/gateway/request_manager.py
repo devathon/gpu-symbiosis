@@ -216,7 +216,7 @@ class RequestManager:
         s = self._states.get(app_id)
         from gpusybio.applications.lifecycle import ProcessState, ResidencyState
 
-        if s.process is not ProcessState.RUNNING or s.residency is not ResidencyState.LOADED:
+        if s.process is not ProcessState.STARTED or s.residency is not ResidencyState.LOADED:
             return False
         if s.draining:
             return False

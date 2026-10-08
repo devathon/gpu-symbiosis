@@ -16,7 +16,6 @@ from gpusybio.database.models import Application, Gateway
 from gpusybio.gateway.request_manager import RequestManager
 from gpusybio.scoring import gateway_score
 from gpusybio.state import StateManager
-from gpusybio.applications.lifecycle import combined_ui_state
 
 
 def _parse_command_env(raw: str | None) -> dict | None:
@@ -59,7 +58,6 @@ def _app_view(row: Application, state, resources) -> dict:
         "description": row.description,
         "process_state": state.process.value,
         "residency_state": state.residency.value,
-        "state": combined_ui_state(state, active),
         "active": active,
         "pid": state.pid,
         "draining": state.draining,

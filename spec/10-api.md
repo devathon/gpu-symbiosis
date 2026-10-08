@@ -46,7 +46,7 @@ Behaviour notes:
   "name": "Qwen 3.8",
   "type": "llama",
   "enabled": true,
-  "process": { "state": "RUNNING", "pid": 12345 },
+  "process": { "state": "STARTED", "pid": 12345 },
   "residency": "LOADED",
   "ui_state": "PROCESSING",
   "port": 3000,

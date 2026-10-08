@@ -114,7 +114,7 @@ async def test_unload_script_makes_app_unloadable(server):
     r = await c.post(f"http://127.0.0.1:{ADMIN_PORT}/api/applications/a4/start")
     assert r.status_code == 202, r.text
     await asyncio.sleep(1.5)
-    assert (await c.get(f"http://127.0.0.1:{ADMIN_PORT}/api/applications/a4")).json()["process_state"] == "RUNNING"
+    assert (await c.get(f"http://127.0.0.1:{ADMIN_PORT}/api/applications/a4")).json()["process_state"] == "STARTED"
 
     # Load a4: no load script -> it becomes LOADED and serves immediately.
     r = await c.post(f"http://127.0.0.1:{ADMIN_PORT}/api/applications/a4/load")
