@@ -18,8 +18,16 @@ Killing happens two ways:
   ``auto_unload`` is on; some enabled, non-paused gateway has waiting
   requests (that is the moment memory is actually needed); the app is idle
   (average GPU% below the activity threshold — "not using GPU"); it holds
-  VRAM at/above ``vram_threshold`` ("only using VRAM"); and its command does
-  not match ``auto_unload_exclude`` (regexp, e.g. ``ffmpeg|vlc``).
+  VRAM at/above ``vram_threshold`` ("only using VRAM"); its command passes
+  the auto-unload regexp rules — it must match ``auto_unload_include`` when
+  that is set (only matching apps are killable) and must not match
+  ``auto_unload_exclude`` (e.g. ``ffmpeg|vlc``), so with both set it must
+  pass both; and it has been observed for at least a full averaging window
+  (measured from when it first appeared in the device listing). A process
+  that only recently appeared is never an auto-kill candidate (this is what
+  keeps a managed app mid-startup safe: while its process tree is still being
+  caught up, its freshly started GPU-holding child can momentarily look
+  "external").
 
 Every kill is logged and published as ``external_app_killed`` (with the
 reason) for the event feed / audit trail.
@@ -41,15 +49,15 @@ from gpusybio.resources.process_tree import process_tree
 log = get_logger("external_apps")
 
 
-def _compile_exclude(pattern: str) -> re.Pattern | None:
-    """The auto-unload exclude regexp; empty or invalid = no exclusions."""
+def _compile_rule(name: str, pattern: str) -> re.Pattern | None:
+    """Compile an auto-unload regexp rule; empty or invalid = not applied."""
     pattern = (pattern or "").strip()
     if not pattern:
         return None
     try:
         return re.compile(pattern)
     except re.error:
-        log.warning("invalid auto_unload_exclude pattern; ignoring", pattern=pattern)
+        log.warning("invalid %s pattern; ignoring", name, pattern=pattern)
         return None
 
 
@@ -100,10 +108,18 @@ class ExternalAppsMonitor:
         self._app_ids = list(app_ids)
         self._interval = max(0.2, interval)
         self._window = max(1.0, window_sec)
-        self._exclude = _compile_exclude(getattr(spec, "auto_unload_exclude", "") or "")
-        # pid -> deque of (t, util) samples; latest VRAM per pid. In-memory only.
+        self._exclude = _compile_rule(
+            "auto_unload_exclude", getattr(spec, "auto_unload_exclude", "") or ""
+        )
+        self._include = _compile_rule(
+            "auto_unload_include", getattr(spec, "auto_unload_include", "") or ""
+        )
+        # pid -> deque of (t, util) samples; latest VRAM per pid; and the
+        # time each pid first appeared in the device listing (the age gate).
+        # In-memory only.
         self._hist: dict[int, deque] = {}
         self._vram: dict[int, float] = {}
+        self._first_seen: dict[int, float] = {}
         self._task: asyncio.Task | None = None
         # Injectable clock (tests monkeypatch the module's time instead).
         self._now = time.time
@@ -144,6 +160,7 @@ class ExternalAppsMonitor:
             if p.pid in managed:
                 continue
             alive.add(p.pid)
+            self._first_seen.setdefault(p.pid, now)
             self._hist.setdefault(p.pid, deque()).append((now, float(p.utilization_pct)))
             self._vram[p.pid] = float(p.memory_mb)
         # Drop state for pids that vanished (process exited / killed).
@@ -174,10 +191,21 @@ class ExternalAppsMonitor:
                     "cmd": cmd,
                     "gpu_pct": round(avg, 1),
                     "vram_mb": round(vram, 1),
-                    "auto_unload_ok": not (self._exclude and self._exclude.search(cmd)),
+                    "auto_unload_ok": self._auto_unload_ok(cmd),
                 }
             )
         return out
+
+    def _auto_unload_ok(self, cmd: str) -> bool:
+        """Whether the command passes the auto-unload regexp rules: it must
+        match ``auto_unload_include`` when that is set (only matching apps are
+        killable) and must not match ``auto_unload_exclude``; with both set it
+        must pass both."""
+        if self._include is not None and not self._include.search(cmd):
+            return False
+        if self._exclude is not None and self._exclude.search(cmd):
+            return False
+        return True
 
     def config(self) -> dict:
         return {
@@ -185,6 +213,7 @@ class ExternalAppsMonitor:
             "vram_threshold": float(self._spec.vram_threshold),
             "auto_unload": bool(self._spec.auto_unload),
             "auto_unload_exclude": self._spec.auto_unload_exclude or "",
+            "auto_unload_include": self._spec.auto_unload_include or "",
         }
 
     def _avg_util(self, pid: int) -> float:
@@ -196,6 +225,7 @@ class ExternalAppsMonitor:
     def _forget(self, pid: int) -> None:
         self._hist.pop(pid, None)
         self._vram.pop(pid, None)
+        self._first_seen.pop(pid, None)
 
     # -- gateway-waiting gate (auto-kill precondition) -----------------------
     def _gateway_waiting(self) -> bool:
@@ -208,6 +238,17 @@ class ExternalAppsMonitor:
         return False
 
     # -- auto-unload pass -----------------------------------------------------
+    def _age_ok(self, pid: int) -> bool:
+        """True when the process has been observed for at least a full
+        averaging window — from when it first appeared in the device listing
+        (``_first_seen``), so a freshly started process (e.g. a managed app
+        still coming up) is never an auto-kill candidate. Overridable in
+        tests."""
+        seen = self._first_seen.get(pid)
+        if seen is None:
+            return False
+        return self._now() - seen >= self._window
+
     async def _auto_kill_pass(self) -> None:
         if not self._gateway_waiting():
             return
@@ -219,6 +260,8 @@ class ExternalAppsMonitor:
                 continue  # not holding meaningful VRAM
             if row["gpu_pct"] >= idle_bar:
                 continue  # using the GPU — "only using VRAM" does not hold
+            if not self._age_ok(row["pid"]):
+                continue  # too new (e.g. still starting up) — never auto-killed
             await self.kill(row["pid"], reason="auto")
 
     # -- kill -----------------------------------------------------------------

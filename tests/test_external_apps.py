@@ -9,6 +9,7 @@ verify the list appears in /api/status and the kill route works end to end.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import time
 
@@ -103,6 +104,16 @@ def _kill(proc):
         proc.wait(timeout=5)
     except Exception:  # noqa: BLE001
         pass
+
+
+async def _wait_exec(pid: int, timeout: float = 3.0) -> None:
+    """Wait until ``sh -c "exec -a ...`` has replaced itself, so the command
+    line (and any regexp matched against it) is stable."""
+    from gpusybio.scheduler.external import _cmd_of
+
+    deadline = time.time() + timeout
+    while time.time() < deadline and _cmd_of(pid).startswith("sh"):
+        await asyncio.sleep(0.05)
 
 
 # -- shown list -----------------------------------------------------------------
@@ -227,11 +238,35 @@ async def test_auto_kill_when_idle_vram_and_gateway_waiting():
     try:
         mon, backend, bus = _mon(rm=_StubRM(lengths={"gw1": 3}))  # 3 waiting
         backend.add_external(p.pid, 512.0, 0.0)  # idle (avg 0 < 5), VRAM 512
-        await mon.tick()
-        assert p.poll() is not None, "should have been auto-killed"
-        kinds = [t for t, _ in bus.events]
+        t = 0.0
+        mon._now = lambda: t
+        await mon.tick()  # first seen @ t=0 -> not yet a full window old
+        assert p.poll() is None  # ...so it survives this pass
+        t = mon._window + 1.0
+        await mon.tick()  # now older than the full averaging window
+        p.wait(timeout=5)
+        assert p.returncode != 0, "should have been auto-killed"
+        kinds = [e for e, _ in bus.events]
         assert kinds == [EXTERNAL_APP_KILLED]
         assert bus.events[0][1]["reason"] == "auto"
+    finally:
+        _kill(p)
+
+
+async def test_no_auto_kill_for_a_fresh_process():
+    # A process observed for less than a full averaging window is never an
+    # auto-kill candidate, even when idle + VRAM + a gateway is waiting — this
+    # is what keeps a managed app mid-startup (whose process tree is still
+    # being caught up, so its freshly started child can momentarily look
+    # "external") from being killed.
+    p = _sleep()
+    try:
+        mon, backend, bus = _mon(rm=_StubRM(lengths={"gw1": 3}))
+        backend.add_external(p.pid, 512.0, 0.0)  # idle, VRAM above threshold
+        await mon.tick()  # first seen now -> age 0 < window
+        assert mon._age_ok(p.pid) is False  # the age gate says too new
+        assert p.poll() is None, "a fresh process must survive"
+        assert bus.events == []
     finally:
         _kill(p)
 
@@ -304,13 +339,86 @@ async def test_no_auto_kill_when_excluded_by_regexp():
         _kill(p)
 
 
+async def test_auto_kill_only_included_commands():
+    # With an include regexp set, only matching commands are killable.
+    p = subprocess.Popen(["sh", "-c", "exec -a vlc sleep 300"])  # argv[0] = "vlc"
+    try:
+        mon, backend, bus = _mon(
+            spec=_spec(auto_unload_include="vlc"), rm=_StubRM(lengths={"gw1": 3})
+        )
+        await _wait_exec(p.pid)
+        backend.add_external(p.pid, 512.0, 0.0)  # idle, VRAM above threshold
+        t = 0.0
+        mon._now = lambda: t
+        await mon.tick()  # first seen
+        t = mon._window + 1.0
+        await mon.tick()  # now older than the full averaging window
+        p.wait(timeout=5)
+        assert p.returncode != 0, "an included command should be auto-killed"
+        assert bus.events and bus.events[0][1]["reason"] == "auto"
+    finally:
+        _kill(p)
+
+
+async def test_no_auto_kill_when_not_matching_include():
+    # The age gate is satisfied (pre-seeded) so the include rule is the only
+    # thing standing between the process and a kill.
+    p = _sleep()  # "sleep 300" does not match the include regexp "vlc"
+    try:
+        mon, backend, bus = _mon(
+            spec=_spec(auto_unload_include="vlc"), rm=_StubRM(lengths={"gw1": 3})
+        )
+        backend.add_external(p.pid, 512.0, 0.0)  # idle, VRAM above threshold
+        await mon.tick()
+        mon._first_seen[p.pid] = mon._now() - (mon._window + 1.0)  # age OK
+        rows = mon.list()
+        assert rows and rows[0]["auto_unload_ok"] is False  # fails the include rule
+        await mon.tick()
+        assert p.poll() is None, "a non-matching include command must survive"
+        assert bus.events == []
+    finally:
+        _kill(p)
+
+
+async def test_include_and_exclude_both_must_pass():
+    # include "vlc|sleep", exclude "sleep": "sleep" matches both -> survives;
+    # "vlc" matches include only -> killed.
+    sleep_p = _sleep()
+    vlc_p = subprocess.Popen(["sh", "-c", "exec -a vlc sleep 300"])  # argv[0] = "vlc"
+    try:
+        mon, backend, bus = _mon(
+            spec=_spec(auto_unload_include="vlc|sleep", auto_unload_exclude="sleep"),
+            rm=_StubRM(lengths={"gw1": 3}),
+        )
+        await _wait_exec(vlc_p.pid)
+        backend.add_external(sleep_p.pid, 512.0, 0.0)
+        backend.add_external(vlc_p.pid, 512.0, 0.0)
+        await mon.tick()
+        # Age both past the full window so the regexp rules are the deciding factor.
+        for q in (sleep_p.pid, vlc_p.pid):
+            mon._first_seen[q] = mon._now() - (mon._window + 1.0)
+        rows = {r["pid"]: r for r in mon.list()}
+        assert rows[sleep_p.pid]["auto_unload_ok"] is False  # matches the exclude
+        assert rows[vlc_p.pid]["auto_unload_ok"] is True  # passes both rules
+        await mon.tick()
+        assert sleep_p.poll() is None, "matching the exclude must survive"
+        vlc_p.wait(timeout=5)
+        assert vlc_p.returncode != 0, "passing both rules should be auto-killed"
+    finally:
+        _kill(sleep_p)
+        _kill(vlc_p)
+
+
 async def test_config_view():
-    mon, _, _ = _mon(spec=_spec(auto_unload_exclude="ffmpeg|vlc"))
+    mon, _, _ = _mon(
+        spec=_spec(auto_unload_exclude="ffmpeg|vlc", auto_unload_include="vlc")
+    )
     assert mon.config() == {
         "gpu_threshold": 20.0,
         "vram_threshold": 100.0,
         "auto_unload": True,
         "auto_unload_exclude": "ffmpeg|vlc",
+        "auto_unload_include": "vlc",
     }
 
 

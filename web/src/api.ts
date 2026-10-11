@@ -441,9 +441,13 @@ export const api = {
   // -- external apps (unmanaged GPU processes) --------------------------------
   externalApps: () => getJson<ExternalAppView[]>("/api/external-apps"),
   externalAppsConfig: () =>
-    getJson<{ gpu_threshold: number; vram_threshold: number; auto_unload: boolean; auto_unload_exclude: string }>(
-      "/api/external-apps/config"
-    ),
+    getJson<{
+      gpu_threshold: number;
+      vram_threshold: number;
+      auto_unload: boolean;
+      auto_unload_exclude: string;
+      auto_unload_include: string;
+    }>("/api/external-apps/config"),
   externalKill: (pid: number) => mut("POST", `/api/external-apps/${pid}/kill`),
 
   // -- gateway lifecycle -------------------------------------------------------

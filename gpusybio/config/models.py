@@ -204,8 +204,11 @@ class ExternalAppsSpec(BaseModel):
     """External apps monitoring (unmanaged system processes using the GPU or
     holding VRAM): they are listed under Applications with a kill button, and —
     when ``auto_unload`` is on — an idle app that only holds VRAM is killed to
-    free memory, but only while a gateway has waiting requests and its command
-    does not match ``auto_unload_exclude`` (regexp, e.g. ``ffmpeg|vlc``)."""
+    free memory, but only while a gateway has waiting requests, the process
+    has been observed for a full averaging window, and its command passes the
+    auto-unload regexp rules: it must match ``auto_unload_include`` when set
+    (only matching apps are killable) and must not match
+    ``auto_unload_exclude``; with both set it must pass both."""
 
     # Average GPU utilization % (60 s rolling window) at or above which the app
     # is shown as an external app.
@@ -217,6 +220,10 @@ class ExternalAppsSpec(BaseModel):
     auto_unload: bool = True
     # Regexp matched against the app's command line; matches are never auto-killed.
     auto_unload_exclude: str = ""
+    # Regexp matched against the app's command line; when set, ONLY matching
+    # apps are auto-killed. With both set, an app must match include AND not
+    # match exclude.
+    auto_unload_include: str = ""
 
 
 class SettingsSpec(BaseModel):

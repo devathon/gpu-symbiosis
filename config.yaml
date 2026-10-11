@@ -37,6 +37,7 @@ settings:
     vram_threshold: 100      # MB at/above which the app is shown
     auto_unload: true
     auto_unload_exclude: "ffmpeg|vlc"
+    auto_unload_include: ""     # set to kill ONLY matching commands ("" = any)
 
 applications:
   # Seed semantics (spec 16 §2.6): the seed creates missing rows only.
