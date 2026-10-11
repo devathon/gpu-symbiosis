@@ -28,6 +28,15 @@ settings:
     enabled: true
     gpu_idle_threshold: 40   # device GPU% below which the GPU counts as "idle"
     cooldown_time: 2         # minutes between two task runs
+  # External apps: unmanaged system processes using the GPU or holding VRAM are
+  # listed under Applications with a kill button. auto_unload kills an idle app
+  # that only holds VRAM (to free memory for a waiting gateway) unless its command
+  # matches auto_unload_exclude (regexp, e.g. "ffmpeg|vlc").
+  external_apps:
+    gpu_threshold: 20        # avg GPU% (60s) at/above which the app is shown
+    vram_threshold: 100      # MB at/above which the app is shown
+    auto_unload: true
+    auto_unload_exclude: "ffmpeg|vlc"
 
 applications:
   # Seed semantics (spec 16 §2.6): the seed creates missing rows only.

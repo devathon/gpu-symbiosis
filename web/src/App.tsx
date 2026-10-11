@@ -273,7 +273,7 @@ export default function App() {
               </div>
 
               <div className="mb-6 grid gap-4 lg:grid-cols-2">
-                <AppCards apps={apps} act={act} showAll={showAllApps} onToggle={setShowAllApps} />
+                <AppCards apps={apps} act={act} showAll={showAllApps} onToggle={setShowAllApps} externalApps={status?.external_apps} />
                 <GatewayCards gws={gws} act={act} decision={decision} showAll={showAllGws} onToggle={setShowAllGws} showDisable={false} />
               </div>
 
@@ -325,6 +325,7 @@ export default function App() {
                     setShowAppForm(false);
                   })
                 }
+                externalApps={status?.external_apps}
               />
             </div>
           )}

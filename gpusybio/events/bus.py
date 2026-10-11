@@ -26,6 +26,9 @@ PROCESS_NOW = "process_now"
 PROCESS_DIED = "process_died"
 RECONCILE = "reconcile"
 TASK_RAN = "task_ran"
+# Informational (external-apps monitor): an unmanaged process was killed —
+# manually from the UI or by the auto-unload pass. Never a scheduler trigger.
+EXTERNAL_APP_KILLED = "external_app_killed"
 
 # Coarse classes: lifecycle events route to their trigger class so the
 # scheduler can wake on e.g. LOAD_READY (class load_complete).

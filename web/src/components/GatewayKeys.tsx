@@ -64,7 +64,7 @@ export default function GatewayKeys({
       ) : (
         <ul className="space-y-1.5">
           {keys.map((k) => (
-            <li key={k.id} className="flex items-center justify-between text-xs text-zinc-400">
+            <li key={k.id} className="-mx-1.5 flex items-center justify-between rounded px-1.5 py-0.5 text-xs text-zinc-400 transition-colors hover:bg-zinc-800/50">
               <span>
                 {k.name || k.id}
                 {k.created_at && <span className="ml-2 text-zinc-600">{new Date(k.created_at).toLocaleString()}</span>}

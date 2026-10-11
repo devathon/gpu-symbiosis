@@ -200,6 +200,25 @@ class TasksSpec(BaseModel):
     cooldown_time: float = Field(default=2.0, ge=0)
 
 
+class ExternalAppsSpec(BaseModel):
+    """External apps monitoring (unmanaged system processes using the GPU or
+    holding VRAM): they are listed under Applications with a kill button, and —
+    when ``auto_unload`` is on — an idle app that only holds VRAM is killed to
+    free memory, but only while a gateway has waiting requests and its command
+    does not match ``auto_unload_exclude`` (regexp, e.g. ``ffmpeg|vlc``)."""
+
+    # Average GPU utilization % (60 s rolling window) at or above which the app
+    # is shown as an external app.
+    gpu_threshold: float = Field(default=20.0, ge=0, le=100)
+    # VRAM (MB) at or above which the app is shown as an external app.
+    vram_threshold: float = Field(default=100.0, ge=0)
+    # True: idle external apps that only hold VRAM are killed automatically
+    # (gated on a waiting gateway + the exclude regexp).
+    auto_unload: bool = True
+    # Regexp matched against the app's command line; matches are never auto-killed.
+    auto_unload_exclude: str = ""
+
+
 class SettingsSpec(BaseModel):
     log_level: str = "INFO"
     gpu: GpuSpec = GpuSpec()
@@ -210,6 +229,7 @@ class SettingsSpec(BaseModel):
     load: LoadSpec = LoadSpec()
     startup: StartupSpec = StartupSpec()
     tasks: TasksSpec = TasksSpec()
+    external_apps: ExternalAppsSpec = ExternalAppsSpec()
 
 
 class Config(BaseModel):

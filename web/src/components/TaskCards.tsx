@@ -47,7 +47,7 @@ export default function TaskCards({
             </thead>
             <tbody>
               {tasks.map((t) => (
-                <tr key={t.id} className="border-b border-zinc-800/60">
+                <tr key={t.id} className="border-b border-zinc-800/60 transition-colors hover:bg-zinc-800/40">
                   <td className="py-2 pr-3">{t.ran ? badge("COMPLETED") : badge("QUEUED")}</td>
                   <td className="py-2 pr-3 text-xs text-zinc-400">{fmtTime(t.run_time)}</td>
                   <td className="py-2 pr-3 font-medium text-zinc-200">{t.name}</td>

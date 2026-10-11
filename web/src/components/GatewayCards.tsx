@@ -117,7 +117,7 @@ export default function GatewayCards({
       </div>
       <div className="space-y-3">
         {visible.map((g) => (
-          <div key={g.id} className="flex items-center gap-3">
+          <div key={g.id} className="-mx-2 flex items-center gap-3 rounded px-2 transition-colors hover:bg-zinc-800/50">
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-medium">{g.name}</span>

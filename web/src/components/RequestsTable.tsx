@@ -24,7 +24,7 @@ export default function RequestsTable({ rows }: { rows: RequestRow[] }) {
         </thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.id} className="border-t border-zinc-800/60">
+            <tr key={r.id} className="border-t border-zinc-800/60 transition-colors hover:bg-zinc-800/40">
               <td className="py-1.5 font-mono text-zinc-400">{fmtWhen(r.received_at)}</td>
               <td>{r.gateway_id}</td>
               <td>{badge(r.status)}</td>

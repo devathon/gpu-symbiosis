@@ -23,6 +23,7 @@ def register(api, ctx) -> None:
     _audit = ctx.audit
     _actor = ctx.actor
     _resource_view = ctx.resource_view
+    external_apps = getattr(ctx, "external_apps", None)
 
     @api.get("/api/status")
     def status():
@@ -33,6 +34,9 @@ def register(api, ctx) -> None:
             "applications": apps_,
             "gateways": gws,
             "resources": _resource_view(),
+            # In-memory external (unmanaged) GPU processes above threshold; the
+            # UI polls this 2 s status — no separate endpoint polling needed.
+            "external_apps": external_apps.list() if external_apps is not None else [],
         }
 
     @api.post("/api/applications", status_code=201)

@@ -32,6 +32,7 @@ class ApiContext:
     # Optional wiring (None when the corresponding subsystem is disabled).
     bus: object = None
     idle_unloader: object = None
+    external_apps: object = None  # ExternalAppsMonitor (external-apps routes)
     on_gateway_created: object = None
     on_gateway_removed: object = None
     # The loaded Config (spec 10): route groups read feature settings from it

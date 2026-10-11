@@ -27,7 +27,7 @@ export default function EventFeed({ events }: { events: EventRow[] }) {
       <h2 className="mb-3 text-xs uppercase tracking-wider text-zinc-500">Event log</h2>
       <div className="flex-1 space-y-1 overflow-y-auto font-mono text-xs">
         {shown.map((e, i) => (
-          <div key={i} className="flex gap-2">
+          <div key={i} className="-mx-1.5 flex gap-2 rounded px-1.5 py-0.5 transition-colors hover:bg-zinc-800/50">
             <span className="shrink-0 text-zinc-600">{new Date(e.at).toLocaleTimeString()}</span>
             <span className={toneFor(e.kind)}>{e.kind}</span>
             <span className="truncate text-zinc-300">{label(e)}</span>

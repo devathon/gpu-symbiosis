@@ -22,6 +22,7 @@ from gpusybio.api import (
     system,
     metrics as metrics_routes,
     tasks as tasks_routes,
+    external_apps as external_apps_routes,
     events,
 )
 # Re-exported for direct import (tests + the app view pre-fill).
@@ -39,6 +40,7 @@ def make_admin_api(
     hub,
     idle_unloader=None,
     bus=None,
+    external_apps=None,
     on_gateway_created=None,
     on_gateway_removed=None,
     config=None,
@@ -54,6 +56,7 @@ def make_admin_api(
         hub=hub,
         idle_unloader=idle_unloader,
         bus=bus,
+        external_apps=external_apps,
         on_gateway_created=on_gateway_created,
         on_gateway_removed=on_gateway_removed,
         config=config,
@@ -68,6 +71,7 @@ def make_admin_api(
     applications.register(api, ctx)
     gateways.register(api, ctx)
     tasks_routes.register(api, ctx)
+    external_apps_routes.register(api, ctx)
     system.register(api, ctx)
     metrics_routes.register(api, ctx)
     events.register(api, ctx)

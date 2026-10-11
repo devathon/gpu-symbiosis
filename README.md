@@ -10,6 +10,9 @@ decides which applications should be resident, loads/unloads them, forwards requ
 guarantees that no request is ever interrupted mid-flight, tracks historical demand and
 performance, and exposes a web UI for configuration and monitoring.
 
+![Project Screenshot](assets/intro.png)<br>
+[Watch Intro video - https://youtu.be/FZvKfk2nSpw](https://youtu.be/FZvKfk2nSpw)
+
 ## Target Workloads
 
 - LLM inference servers (llama.cpp / `llama-server`)

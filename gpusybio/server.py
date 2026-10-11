@@ -37,6 +37,7 @@ from gpusybio.resources.gpu import make_backend
 from gpusybio.resources.manager import ResourceManager
 from gpusybio.resources.process_tree import pid_alive
 from gpusybio.scheduler import Scheduler
+from gpusybio.scheduler.external import ExternalAppsMonitor
 from gpusybio.scheduler.idle import IdleUnloader
 from gpusybio.scheduler.residency_monitor import ResidencyMonitor
 from gpusybio.scheduler.tasks import TaskScheduler
@@ -139,6 +140,13 @@ class Server:
             config.settings.tasks, self.db, self.resources, self.states, self.apps,
             self.bus, self.idle_unloader, self.data_path,
         )
+        # External apps (unmanaged GPU processes): listed under Applications with
+        # a kill button; the auto-unload pass kills an idle, VRAM-holding app
+        # (gated on a waiting gateway + the exclude regexp). In-memory only.
+        self.external_apps = ExternalAppsMonitor(
+            self.resources, self.states, self.request_manager, self.bus,
+            config.settings.external_apps, self.app_ids,
+        )
         # gw_id -> (uvicorn.Server, serve task). The task is awaited on
         # re-spawn so the old listening socket is really closed before we
         # re-bind (spec 11 §3: re-saving a gateway must not fail with
@@ -149,6 +157,7 @@ class Server:
             self.apps, self.scheduler, self.metrics, self.hub,
             idle_unloader=self.idle_unloader,
             bus=self.bus,
+            external_apps=self.external_apps,
             on_gateway_created=self._spawn_gateway,
             on_gateway_removed=self._remove_gateway,
             config=self.config,
@@ -306,6 +315,7 @@ class Server:
         self.idle_unloader.start()
         self.residency_monitor.start()
         self.task_scheduler.start()
+        self.external_apps.start()
 
         # Wait for all listeners.
         try:
@@ -357,6 +367,7 @@ class Server:
             await self.idle_unloader.stop()
             await self.residency_monitor.stop()
             await self.task_scheduler.stop()
+            await self.external_apps.stop()
         except Exception:  # noqa: BLE001
             pass
         if self.session is not None:

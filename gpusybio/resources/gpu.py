@@ -35,10 +35,26 @@ class GpuSample:
         return (self.used_mb / self.total_mb * 100.0) if self.total_mb else 0.0
 
 
+@dataclass
+class ExternalProcess:
+    """One GPU process as seen by the backend (the external-apps monitor
+    filters out the PIDs of managed applications, including their children)."""
+
+    pid: int
+    memory_mb: float
+    utilization_pct: float
+
+
 class GpuBackend(Protocol):
     """Hardware abstraction (spec 07 §2)."""
 
     def sample(self) -> GpuSample: ...
+
+    def external_processes(self) -> list[ExternalProcess]:
+        """Every GPU compute process on the device (pid, VRAM, SM
+        utilization). Callers exclude managed applications; on the fake
+        backend this returns only the simulated external set."""
+        ...
 
     def process_memory_mb(self, pid: int | None) -> float:
         """GPU memory attributed to a PID *and all its descendant
@@ -80,6 +96,10 @@ class FakeGpuBackend:
         self._active_util: dict[str, float] = {}
         # pid -> app_id for live attribution
         self._pid_app: dict[int, str] = {}
+        # Simulated EXTERNAL (unmanaged) processes: pid -> (memory_mb, utilization_pct).
+        # Independent of the app-driven memory above, so the external-apps monitor
+        # and its tests see only these.
+        self._external: dict[int, tuple[float, float]] = {}
 
     # -- simulation controls (used by ResourceManager) -------------------
     def set_target(self, app_id: str, total_mb: float) -> None:
@@ -103,6 +123,22 @@ class FakeGpuBackend:
         if pid is None:
             return
         self._pid_app[pid] = app_id
+
+    # -- external-process simulation (external-apps monitor / tests) --------
+    def add_external(self, pid: int, memory_mb: float, utilization_pct: float = 0.0) -> None:
+        """Simulate an unmanaged process using the GPU / holding VRAM."""
+        self._external[pid] = (memory_mb, utilization_pct)
+
+    def set_external(self, pid: int, memory_mb: float | None = None, utilization_pct: float | None = None) -> None:
+        """Adjust an existing simulated external process (missing fields kept)."""
+        cur = self._external.get(pid, (0.0, 0.0))
+        self._external[pid] = (
+            memory_mb if memory_mb is not None else cur[0],
+            utilization_pct if utilization_pct is not None else cur[1],
+        )
+
+    def remove_external(self, pid: int) -> None:
+        self._external.pop(pid, None)
 
     def step(self) -> None:
         """No-op: transitions are instant in the fake backend."""
@@ -149,6 +185,13 @@ class FakeGpuBackend:
     def supports_process_utilization(self) -> bool:
         # The fake models per-process utilization via mark_active().
         return True
+
+    def external_processes(self) -> list[ExternalProcess]:
+        # Only the simulated external set (app-driven memory never appears).
+        return [
+            ExternalProcess(pid=pid, memory_mb=mem, utilization_pct=util)
+            for pid, (mem, util) in sorted(self._external.items())
+        ]
 
 
 class NvmlBackend:
@@ -290,6 +333,24 @@ class NvmlBackend:
             if u:
                 total += u
         return min(100.0, total)
+
+    def external_processes(self) -> list[ExternalProcess]:
+        """Every compute process on the device (the caller excludes managed
+        application trees). SM utilization comes from the last
+        ``nvmlDeviceGetProcessUtilization`` window — absent means idle (0%)."""
+        pynvml = self._pynvml
+        try:
+            infos = pynvml.nvmlDeviceGetComputeRunningProcesses(self._handle)
+        except Exception:  # noqa: BLE001 - transient / API unavailable
+            return []
+        return [
+            ExternalProcess(
+                pid=info.pid,
+                memory_mb=(info.usedGpuMemory or 0) / MB,
+                utilization_pct=self._proc_util.get(info.pid, 0.0),
+            )
+            for info in infos
+        ]
 
     def set_loaded(self, app_id: str, memory_mb: float) -> None:
         """No-op on real hardware.

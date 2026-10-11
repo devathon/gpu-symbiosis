@@ -1,4 +1,4 @@
-import { api, AppView } from "../api";
+import { api, AppView, ExternalAppView } from "../api";
 import { badge, IconBtn, appDisplayState, appResidencyDisplay, showAppResidency } from "./badges";
 
 export default function AppCards({
@@ -8,6 +8,8 @@ export default function AppCards({
   onDelete,
   showAll,
   onToggle,
+  externalApps,
+  onKillExternal,
 }: {
   apps: AppView[];
   act: (fn: () => Promise<void>) => void;
@@ -17,10 +19,19 @@ export default function AppCards({
       Applications page) → always show all, no toggle. */
   showAll?: boolean;
   onToggle?: (showAll: boolean) => void;
+  /** External (unmanaged) GPU processes above threshold, with a kill button. */
+  externalApps?: ExternalAppView[];
+  onKillExternal?: (pid: number) => void;
 }) {
   const forceStop = (a: AppView) => {
     if (!window.confirm(`Force-stop ${a.name}? Active requests will be dropped.`)) return;
     act(() => api.appStop(a.id, true));
+  };
+
+  const killExternal = (e: ExternalAppView) => {
+    if (!window.confirm(`Kill ${e.cmd} (pid ${e.pid})? This is a SIGKILL.`)) return;
+    if (onKillExternal) onKillExternal(e.pid);
+    else act(() => api.externalKill(e.pid));
   };
 
   // Filter only when the dashboard toggle is present; the Applications page
@@ -50,7 +61,7 @@ export default function AppCards({
       </div>
       <div className="space-y-3">
         {visible.map((a) => (
-          <div key={a.id} className="flex items-center gap-3">
+          <div key={a.id} className="-mx-2 flex items-center gap-3 rounded px-2 transition-colors hover:bg-zinc-800/50">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="font-medium">
@@ -132,6 +143,40 @@ export default function AppCards({
           </p>
         )}
       </div>
+      {externalApps && externalApps.length > 0 && (
+        <div className="mt-3 border-t border-zinc-800 pt-3">
+          <div className="mb-2 text-xs uppercase tracking-wider text-zinc-500">External</div>
+          <div className="space-y-3">
+            {externalApps.map((e) => (
+              <div key={e.pid} className="-mx-2 flex items-center gap-3 rounded px-2 transition-colors hover:bg-zinc-800/50">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-medium" title={e.cmd}>
+                      {e.cmd} <span className="font-normal text-zinc-500">(external)</span>
+                    </span>
+                    {badge("RUNNING")}
+                  </div>
+                  <div className="mt-1 text-xs text-zinc-500">
+                    {e.gpu_pct.toFixed(0)}% GPU · {e.vram_mb.toFixed(0)} MB VRAM
+                    {!e.auto_unload_ok && (
+                      <span className="ml-1 text-zinc-600">(excluded from auto-kill)</span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  <IconBtn
+                    label="Kill"
+                    icon="forceStop"
+                    danger
+                    title="Kill this unmanaged process (SIGKILL)"
+                    onClick={() => killExternal(e)}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
