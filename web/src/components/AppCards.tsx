@@ -1,5 +1,5 @@
 import { api, AppView } from "../api";
-import { badge, Btn, appDisplayState, appResidencyDisplay, showAppResidency } from "./badges";
+import { badge, IconBtn, appDisplayState, appResidencyDisplay, showAppResidency } from "./badges";
 
 export default function AppCards({
   apps,
@@ -44,7 +44,7 @@ export default function AppCards({
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               {showAll ? <path d="m18 15-6-6-6 6" /> : <path d="m6 9 6 6 6-6" />}
             </svg>
-            {showAll ? "active" : "all"}
+            {showAll ? "Show Active" : "Show All"}
           </button>
         )}
       </div>
@@ -53,10 +53,10 @@ export default function AppCards({
           <div key={a.id} className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
-                <span className="font-medium">{a.name}</span>
-                {a.application_type && (
-                  <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">{a.application_type}</span>
-                )}
+                <span className="font-medium">
+                  {a.name}
+                  {a.application_type && <span className="font-normal text-zinc-500"> ({a.application_type})</span>}
+                </span>
                 {/* Two independent state machines (spec 04 §2): the process state
                     (shown as RUNNING when active, STARTED when idle) and the
                     residency state (shown only when started + load/unload
@@ -74,7 +74,7 @@ export default function AppCards({
                 )}
               </div>
             </div>
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap gap-1">
               {a.process_state === "STARTED" ? (
                 <>
                   {/* Load button only when the app HAS a load script; an
@@ -84,26 +84,39 @@ export default function AppCards({
                       Stop is ALWAYS available (the direct-kill path).
                       Force Stop (immediate kill) is always shown. */}
                   {a.load_script && a.residency_state !== "LOADED" && (
-                    <Btn label="Load" onClick={() => act(() => api.appLoad(a.id))} />
+                    <IconBtn label="Load" icon="load" onClick={() => act(() => api.appLoad(a.id))} />
                   )}
                   {a.unload_script && a.residency_state === "LOADED" && (
-                    <Btn label="Unload" onClick={() => act(() => api.appUnload(a.id))} />
+                    <IconBtn label="Unload" icon="unload" onClick={() => act(() => api.appUnload(a.id))} />
                   )}
-                  <Btn label="Stop" onClick={() => act(() => api.appStop(a.id))} />
-                  <Btn label="Force Stop" title="Kill immediately, dropping active requests" onClick={() => forceStop(a)} />
+                  <IconBtn label="Stop" icon="stop" onClick={() => act(() => api.appStop(a.id))} />
+                  <IconBtn
+                    label="Force Stop"
+                    icon="forceStop"
+                    danger
+                    title="Kill immediately, dropping active requests"
+                    onClick={() => forceStop(a)}
+                  />
                 </>
               ) : (
-                <Btn label="Start" onClick={() => act(() => api.appStart(a.id))} />
+                <IconBtn label="Start" icon="play" onClick={() => act(() => api.appStart(a.id))} />
               )}
               {a.pinned ? (
-                <Btn label="Unpin" onClick={() => act(() => api.appUnpin(a.id))} />
+                <IconBtn label="Unpin" icon="pinOff" onClick={() => act(() => api.appUnpin(a.id))} />
               ) : (
-                <Btn label="Pin" title="Exclude from automatic unloading" onClick={() => act(() => api.appPin(a.id))} />
+                <IconBtn
+                  label="Pin"
+                  icon="pin"
+                  title="Exclude from automatic unloading"
+                  onClick={() => act(() => api.appPin(a.id))}
+                />
               )}
-              {onEdit && <Btn label="Edit" onClick={() => onEdit(a)} />}
+              {onEdit && <IconBtn label="Edit" icon="edit" onClick={() => onEdit(a)} />}
               {onDelete && (
-                <Btn
+                <IconBtn
                   label="Delete"
+                  icon="trash"
+                  danger
                   onClick={() => {
                     if (window.confirm(`Delete ${a.id}? Its gateways and request history are removed.`))
                       onDelete(a);

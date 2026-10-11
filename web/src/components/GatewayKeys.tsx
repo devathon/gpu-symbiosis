@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, KeyRow } from "../api";
-import { Btn } from "./badges";
+import { Btn, IconBtn } from "./badges";
 
 // Per-gateway API key management (spec 12 §2). The plaintext key is shown
 // once at creation.
@@ -69,8 +69,10 @@ export default function GatewayKeys({
                 {k.name || k.id}
                 {k.created_at && <span className="ml-2 text-zinc-600">{new Date(k.created_at).toLocaleString()}</span>}
               </span>
-              <Btn
+              <IconBtn
                 label="Delete"
+                icon="trash"
+                danger
                 onClick={() => {
                   if (window.confirm(`Delete key "${k.name || k.id}"?`))
                     act(async () => {

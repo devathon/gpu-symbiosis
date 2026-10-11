@@ -17,7 +17,6 @@ export default function RequestsTable({ rows }: { rows: RequestRow[] }) {
           <tr>
             <th className="pb-2">received</th>
             <th>gateway</th>
-            <th>app</th>
             <th>status</th>
             <th>queue wait</th>
             <th>service</th>
@@ -28,7 +27,6 @@ export default function RequestsTable({ rows }: { rows: RequestRow[] }) {
             <tr key={r.id} className="border-t border-zinc-800/60">
               <td className="py-1.5 font-mono text-zinc-400">{fmtWhen(r.received_at)}</td>
               <td>{r.gateway_id}</td>
-              <td>{r.application_id}</td>
               <td>{badge(r.status)}</td>
               <td>{r.queue_wait_sec != null ? `${r.queue_wait_sec.toFixed(2)}s` : "—"}</td>
               <td>{r.service_time_sec != null ? `${r.service_time_sec.toFixed(2)}s` : "—"}</td>

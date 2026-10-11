@@ -15,7 +15,15 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from gpusybio.api.context import ApiContext
-from gpusybio.api import auth, applications, gateways, system, metrics as metrics_routes, events
+from gpusybio.api import (
+    auth,
+    applications,
+    gateways,
+    system,
+    metrics as metrics_routes,
+    tasks as tasks_routes,
+    events,
+)
 # Re-exported for direct import (tests + the app view pre-fill).
 from gpusybio.api.views import _app_view  # noqa: F401
 
@@ -33,6 +41,7 @@ def make_admin_api(
     bus=None,
     on_gateway_created=None,
     on_gateway_removed=None,
+    config=None,
 ) -> FastAPI:
     ctx = ApiContext(
         db=db,
@@ -47,16 +56,18 @@ def make_admin_api(
         bus=bus,
         on_gateway_created=on_gateway_created,
         on_gateway_removed=on_gateway_removed,
+        config=config,
     )
     api = FastAPI(title="GPUSymbiosis", version="0.1.0")
     ctx.api = api
 
     # Registration order preserved from the original single closure: admin auth
-    # + middleware first, then status/applications, gateways, system, metrics,
-    # and finally SSE + the event observer + web UI + CORS.
+    # + middleware first, then status/applications, gateways, tasks, system,
+    # metrics, and finally SSE + the event observer + web UI + CORS.
     auth.register(api, ctx)
     applications.register(api, ctx)
     gateways.register(api, ctx)
+    tasks_routes.register(api, ctx)
     system.register(api, ctx)
     metrics_routes.register(api, ctx)
     events.register(api, ctx)

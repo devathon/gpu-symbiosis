@@ -15,6 +15,7 @@ from gpusybio.database.models import (
     Request,
     SchedulerEvent,
     Setting,
+    Task,
 )
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "Request",
     "SchedulerEvent",
     "Setting",
+    "Task",
     "SessionFactory",
     "create_engine",
     "init_db",

@@ -25,6 +25,7 @@ from gpusybio.config.models import (
     GatewaySpec,
     SchedulerSpec,
     SettingsSpec,
+    TasksSpec,
 )
 from gpusybio.server import Server
 
@@ -76,6 +77,7 @@ def make_config(
     scheduler: SchedulerSpec | None = None,
     application_types: dict[str, str] | None = None,
     applications: list[ApplicationSpec] | None = None,
+    tasks: TasksSpec | None = None,
 ) -> Config:
     tmp = f"/tmp/gpusybio-e2e-{os.getpid()}.db"
     if os.path.exists(tmp):
@@ -118,6 +120,7 @@ def make_config(
                 memory_safety_margin=0.10,
             ),
             scheduler=scheduler or SchedulerSpec(),
+            tasks=tasks or TasksSpec(),
         ),
     )
 
@@ -166,7 +169,8 @@ async def server(cfg_overrides):
     scheduler = cfg_overrides.get("scheduler")
     app_types = cfg_overrides.get("application_types")
     apps = cfg_overrides.get("applications")
-    srv = Server(make_config(scheduler, application_types=app_types, applications=apps))
+    tasks = cfg_overrides.get("tasks")
+    srv = Server(make_config(scheduler, application_types=app_types, applications=apps, tasks=tasks))
     task = asyncio.create_task(srv.serve())
     await _wait(lambda: _port_up(ADMIN_PORT), timeout=10)
     yield srv

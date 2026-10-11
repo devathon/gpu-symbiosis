@@ -19,6 +19,15 @@ settings:
     memory_reserve_mb: 2048
     memory_safety_margin: 0.10
   log_level: INFO
+  # Idle-time task scheduling (the Tasks feature): launch a one-shot command when
+  # the GPU has been idle. A task fires inside its window, once the GPU% has
+  # stayed below gpu_idle_threshold for its idle time, after the cooldown, and once
+  # its VRAM requirement is met (freeing idle unloadable apps if needed).
+  # enabled: false hides the Tasks page/link AND pauses the scheduler.
+  tasks:
+    enabled: true
+    gpu_idle_threshold: 40   # device GPU% below which the GPU counts as "idle"
+    cooldown_time: 2         # minutes between two task runs
 
 applications:
   # Seed semantics (spec 16 §2.6): the seed creates missing rows only.

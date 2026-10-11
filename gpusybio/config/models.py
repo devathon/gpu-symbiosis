@@ -183,6 +183,23 @@ class StartupSpec(BaseModel):
     pid_grace_sec: float = 5.0
 
 
+class TasksSpec(BaseModel):
+    """Idle-time task scheduling: launch a one-shot command when the GPU has been
+    idle. A task fires only inside its window, once the GPU has stayed below
+    ``gpu_idle_threshold`` for its idle time, after the cooldown, and once its
+    VRAM requirement is met (freeing idle unloadable apps if needed)."""
+
+    # False: hide the Tasks page/link AND pause the scheduler (no auto-runs).
+    # CRUD endpoints stay available either way.
+    enabled: bool = False
+    # Device GPU-utilization % below which the GPU counts as "idle" (the task
+    # idle check is device-level: GPU% < threshold for the task's idle time).
+    gpu_idle_threshold: float = Field(default=40.0, ge=0, le=100)
+    # Minutes to wait between two task runs (lets an already-launched task start
+    # consuming the GPU before the next one is eligible).
+    cooldown_time: float = Field(default=2.0, ge=0)
+
+
 class SettingsSpec(BaseModel):
     log_level: str = "INFO"
     gpu: GpuSpec = GpuSpec()
@@ -192,6 +209,7 @@ class SettingsSpec(BaseModel):
     requests: RequestsSpec = RequestsSpec()
     load: LoadSpec = LoadSpec()
     startup: StartupSpec = StartupSpec()
+    tasks: TasksSpec = TasksSpec()
 
 
 class Config(BaseModel):

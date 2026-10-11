@@ -34,6 +34,9 @@ class ApiContext:
     idle_unloader: object = None
     on_gateway_created: object = None
     on_gateway_removed: object = None
+    # The loaded Config (spec 10): route groups read feature settings from it
+    # (e.g. the Tasks group's ``/api/tasks/config``).
+    config: object = None
 
     # Set after construction; the route groups register themselves on it.
     api: FastAPI | None = field(default=None, repr=False)

@@ -123,6 +123,11 @@ class EvaluateMixin:
                     continue
                 free = self._rm.app_limit(res) - self._rm.active_count(res)
                 fwd = self._forward(res, free)
+                if fwd == 0:
+                    # Only a paused gateway's requests are queued (spec 11) —
+                    # nothing signalable; wait for the unpause (and let the
+                    # candidate path consider other gateways this tick).
+                    continue
                 return await self._decide(
                     trigger, None, None, "activate_concurrent", 0.0, 0.0, 0.0,
                     detail=f"forwarded {fwd} queued request(s) for resident {res} (zero-cost)",
@@ -332,9 +337,22 @@ class EvaluateMixin:
         not ready (so the next trigger re-evaluates — no slot is ever lost,
         Invariant 5). The scheduler never removes a slot or marks it in-flight
         itself: `begin_forward` is the single slot-lifecycle authority.
+
+        spec 11: a paused gateway's queued slots are never signaled — the
+        proxy's `begin_forward` would refuse the pause and the caller would
+        cancel the signaled request. They wait for the unpause.
         """
+
+        def _forwardable(slot) -> bool:
+            gw = self._rm.gateway(slot.gateway_id)
+            return gw is not None and not gw.get("paused", False)
+
         slots = sorted(
-            (s for s in self._rm.queue().all_slots() if s.application_id == app_id),
+            (
+                s
+                for s in self._rm.queue().all_slots()
+                if s.application_id == app_id and _forwardable(s)
+            ),
             key=lambda s: (-s.priority, s.queued_at),
         )
         count = min(len(slots), limit)

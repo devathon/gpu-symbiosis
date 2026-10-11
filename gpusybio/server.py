@@ -39,6 +39,7 @@ from gpusybio.resources.process_tree import pid_alive
 from gpusybio.scheduler import Scheduler
 from gpusybio.scheduler.idle import IdleUnloader
 from gpusybio.scheduler.residency_monitor import ResidencyMonitor
+from gpusybio.scheduler.tasks import TaskScheduler
 from gpusybio.state import StateManager
 
 log = get_logger("server")
@@ -99,6 +100,7 @@ class Server:
                 "request_timeout_sec": g.request_timeout_sec,
                 "max_concurrent_requests": g.max_concurrent_requests,
                 "enabled": g.enabled,
+                "paused": g.paused,
             }
             for g in gw_rows
         }
@@ -131,6 +133,12 @@ class Server:
             self.resources, self.states, self.apps, self.bus,
             self.app_ids, db=self.db,
         )
+        # The Tasks feature: one-shot commands launched when the GPU is idle.
+        # Paused when config.settings.tasks.enabled is False (the tick returns early).
+        self.task_scheduler = TaskScheduler(
+            config.settings.tasks, self.db, self.resources, self.states, self.apps,
+            self.bus, self.idle_unloader, self.data_path,
+        )
         # gw_id -> (uvicorn.Server, serve task). The task is awaited on
         # re-spawn so the old listening socket is really closed before we
         # re-bind (spec 11 §3: re-saving a gateway must not fail with
@@ -143,6 +151,7 @@ class Server:
             bus=self.bus,
             on_gateway_created=self._spawn_gateway,
             on_gateway_removed=self._remove_gateway,
+            config=self.config,
         )
         self._tasks: list[asyncio.Task] = []
         self._servers: list[uvicorn.Server] = []
@@ -296,6 +305,7 @@ class Server:
         self.metrics.start()
         self.idle_unloader.start()
         self.residency_monitor.start()
+        self.task_scheduler.start()
 
         # Wait for all listeners.
         try:
@@ -346,6 +356,7 @@ class Server:
             await self.metrics.stop()
             await self.idle_unloader.stop()
             await self.residency_monitor.stop()
+            await self.task_scheduler.stop()
         except Exception:  # noqa: BLE001
             pass
         if self.session is not None:

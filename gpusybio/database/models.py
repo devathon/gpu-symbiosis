@@ -123,6 +123,11 @@ class Gateway(Base):
     max_waiting_time_sec: Mapped[int] = mapped_column(Integer, default=300)
     wait_timeout_policy: Mapped[str] = mapped_column(Text, default="ESCALATE_PRIORITY")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Operational hold (spec 11): a paused gateway still accepts requests (no 503)
+    # but stops forwarding them to the app — they wait in the queue until
+    # unpause. In-flight requests finish normally. Distinct from `enabled`
+    # (False → 503 reject). Persisted like `enabled`; the seed never overwrites it.
+    paused: Mapped[bool] = mapped_column(Boolean, default=False)
     request_timeout_sec: Mapped[float | None] = mapped_column(Float)
     max_concurrent_requests: Mapped[int] = mapped_column(Integer, default=1)
 
@@ -266,6 +271,31 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[str] = mapped_column(Text)  # JSON scalar
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Task(Base):
+    """One idle-time scheduled command (the Tasks feature).
+
+    One-shot: when the GPU has been idle and it falls inside its window, the
+    task's command is launched (detached, long-running) and the task is frozen
+    (``ran=True``) — a ran task cannot be edited (use copy to make a new one).
+    ``vram_requirement`` is in MB; the scheduler frees idle unloadable apps to
+    meet it if needed.
+    """
+
+    __tablename__ = "tasks"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)  # uuid, auto-generated
+    name: Mapped[str] = mapped_column(Text)
+    start_time: Mapped[str] = mapped_column(Text)  # "HH:MM"
+    end_time: Mapped[str] = mapped_column(Text)  # "HH:MM"
+    idle_time: Mapped[int] = mapped_column(Integer, default=0)  # minutes the GPU must be idle
+    vram_requirement: Mapped[int] = mapped_column(Integer, default=0)  # MB
+    command: Mapped[str] = mapped_column(Text)
+    ran: Mapped[bool] = mapped_column(Boolean, default=False)
+    run_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

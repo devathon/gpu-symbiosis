@@ -44,6 +44,7 @@ def register(api, ctx) -> None:
             "request_timeout_sec": row.request_timeout_sec,
             "max_concurrent_requests": row.max_concurrent_requests,
             "enabled": row.enabled,
+            "paused": row.paused,
             "port": row.port,
         })
         if on_gateway_created is not None:
@@ -151,6 +152,34 @@ def register(api, ctx) -> None:
             gc["enabled"] = False
         return {"id": gw_id, "enabled": False}
 
+    @api.post("/api/gateways/{gw_id}/pause")
+    async def pause_gateway(gw_id: str, request: Request):
+        # spec 11: keep accepting requests but stop forwarding to the app —
+        # queued requests wait until unpause; in-flight requests finish.
+        with db() as s:
+            row = s.get(Gateway, gw_id)
+            if row is None:
+                raise HTTPException(404, "not found")
+            row.paused = True
+        gc = request_manager.gateway_configs().get(gw_id)
+        if gc is not None:
+            gc["paused"] = True
+        await _audit("gateway_paused", actor=_actor(request), detail=gw_id)
+        return {"id": gw_id, "paused": True}
+
+    @api.post("/api/gateways/{gw_id}/unpause")
+    async def unpause_gateway(gw_id: str, request: Request):
+        with db() as s:
+            row = s.get(Gateway, gw_id)
+            if row is None:
+                raise HTTPException(404, "not found")
+            row.paused = False
+        gc = request_manager.gateway_configs().get(gw_id)
+        if gc is not None:
+            gc["paused"] = False
+        await _audit("gateway_unpaused", actor=_actor(request), detail=gw_id)
+        return {"id": gw_id, "paused": False}
+
     @api.post("/api/gateways/{gw_id}/keys", status_code=201)
     def create_key(gw_id: str, name: str | None = None):
         with db() as s:
@@ -191,10 +220,12 @@ def register(api, ctx) -> None:
         if not confirm:
             raise HTTPException(409, "clear queue requires confirm=true")
         slots = request_manager.queue().clear(gw_id)
+        # Route through cancel() (not a raw _update_status): _finish sets the
+        # per-request forward event, so each parked client wakes immediately
+        # and receives 409 "request cancelled" instead of sitting until its
+        # own wait-timeout expires it (status overwritten to EXPIRED).
         for slot in slots:
-            request_manager._forward.pop(slot.request_id, None)
-            await request_manager._update_status(slot.request_id, "CANCELLED", completed_at=True,
-                                                error="queue cleared")
+            await request_manager.cancel(slot.request_id, detail="queue cleared")
         await _audit("clear_queue", actor=_actor(request), detail=gw_id)
         return {"id": gw_id, "cancelled": len(slots)}
 

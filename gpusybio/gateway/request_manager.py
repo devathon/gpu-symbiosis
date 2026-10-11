@@ -208,9 +208,16 @@ class RequestManager:
         return True
 
     def can_forward_now(self, gateway_id: str) -> bool:
-        """App ready + concurrency slot free → forward directly, no queueing."""
+        """App ready + concurrency slot free → forward directly, no queueing.
+
+        A paused gateway (spec 11) never forwards: its requests stay in the
+        queue until unpause. This is the single gate for the immediate-forward
+        path, the post-signal path, and the WebSocket bridge.
+        """
         gw = self._gateways.get(gateway_id)
         if gw is None:
+            return False
+        if gw.get("paused", False):
             return False
         app_id = gw["application_id"]
         s = self._states.get(app_id)
@@ -270,13 +277,18 @@ class RequestManager:
         await self._finish(request_id, status, app_id, error,
                           input_tokens=input_tokens, output_tokens=output_tokens)
 
-    async def cancel(self, request_id: str) -> None:
-        """Client disconnect / queue full / explicit clear (Invariant 6)."""
+    async def cancel(self, request_id: str, detail: str = "client disconnected") -> None:
+        """Client disconnect / queue full / explicit clear (Invariant 6).
+
+        Routes through ``_finish`` so the parked waiter is woken (event set)
+        and the terminal state is what the client sees — never left to its
+        own wait-timeout cycle.
+        """
         slot = self._queue.remove(request_id)
         if slot is None:
             slot = self._inflight.get(request_id) or self._slot_from_db(request_id)
         app_id = slot.application_id if slot else ""
-        await self._finish(request_id, "CANCELLED", app_id, "client disconnected")
+        await self._finish(request_id, "CANCELLED", app_id, detail)
 
     async def expire(self, request_id: str, detail: str = "wait timeout") -> None:
         slot = self._queue.remove(request_id)

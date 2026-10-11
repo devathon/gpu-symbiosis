@@ -47,6 +47,7 @@ from gpusybio.state import StateManager
 
 from gpusybio.scheduler.scoring import ScoringMixin
 from gpusybio.scheduler.evaluate import EvaluateMixin
+from gpusybio.scheduler.tasks import TaskScheduler
 
 log = get_logger("scheduler")
 

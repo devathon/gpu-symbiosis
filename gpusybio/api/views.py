@@ -189,6 +189,7 @@ def _gw_view(row: Gateway, rm: RequestManager, states: StateManager) -> dict:
         "request_timeout_sec": row.request_timeout_sec,
         "max_concurrent_requests": row.max_concurrent_requests,
         "enabled": row.enabled,
+        "paused": row.paused,
         "state": _gw_state(row, rm, states),
         "queue": {
             "length": rm.queue().length(row.id),
@@ -201,6 +202,8 @@ def _gw_view(row: Gateway, rm: RequestManager, states: StateManager) -> dict:
 def _gw_state(row: Gateway, rm: RequestManager, states: StateManager) -> str:
     if not row.enabled:
         return "DISABLED"
+    if row.paused:
+        return "PAUSED"
     s = states.get(row.application_id)
     from gpusybio.applications.lifecycle import ProcessState, ResidencyState
 

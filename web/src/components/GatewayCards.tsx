@@ -1,5 +1,5 @@
 import { api, Decision, GwView, ScoreBreakdown } from "../api";
-import { badge, Btn } from "./badges";
+import { badge, Btn, IconBtn } from "./badges";
 
 function num(v: number | undefined | null) {
   if (v === undefined || v === null) return "—";
@@ -68,6 +68,7 @@ export default function GatewayCards({
   onQueue,
   showAll,
   onToggle,
+  showDisable = true,
 }: {
   gws: GwView[];
   act: (fn: () => Promise<void>) => void;
@@ -80,6 +81,9 @@ export default function GatewayCards({
       (the Gateways page) → always show all, no toggle. */
   showAll?: boolean;
   onToggle?: (showAll: boolean) => void;
+  /** The Disable/Enable toggle is a management action — the dashboard shows it
+      read-only, so it passes false; the Gateways page keeps it (default). */
+  showDisable?: boolean;
 }) {
   // The score is only meaningful while the scheduler is actively considering a
   // switch (a candidate exists); when idle (no_candidate) it is static noise.
@@ -107,7 +111,7 @@ export default function GatewayCards({
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               {showAll ? <path d="m18 15-6-6-6 6" /> : <path d="m6 9 6 6 6-6" />}
             </svg>
-            {showAll ? "active" : "all"}
+            {showAll ? "Show Active" : "Show All"}
           </button>
         )}
       </div>
@@ -117,7 +121,11 @@ export default function GatewayCards({
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-medium">{g.name}</span>
-                {g.state !== "IDLE" && badge(g.state)}
+                {/* Only gateway-own statuses get a badge (spec: the app-derived
+                    states — ERROR/LOADING/UNLOADING/DISABLED — are shown on the
+                    application, not on the gateway). */}
+                {(g.state === "PROCESSING" || g.state === "WAITING" || g.state === "PAUSED") &&
+                  badge(g.state)}
                 {switchActive && <ScoreBadge g={g} decision={decision} />}
                 {!g.enabled && <span className="rounded bg-zinc-800 px-1.5 text-xs text-zinc-500">disabled</span>}
               </div>
@@ -126,22 +134,45 @@ export default function GatewayCards({
                 {g.queue.length > 0 && ` (oldest ${g.queue.oldest_wait_sec}s)`}
               </div>
             </div>
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap items-center gap-1">
               {g.queue.length > 0 && <Btn label="Clear" onClick={() => act(() => api.gwClear(g.id))} />}
-              <Btn
+              <IconBtn
                 label="Process Now"
+                icon="fastForward"
                 onClick={() => act(() => api.gwProcessNow(g.id))}
                 title="Raise this gateway's scheduling priority (time-decayed boost; never kills active work)"
               />
-              {g.enabled ? (
-                <Btn label="Disable" onClick={() => act(() => api.gwDisable(g.id))} />
+              {showDisable && (g.enabled ? (
+                <IconBtn
+                  label="Disable"
+                  icon="power"
+                  danger
+                  onClick={() => act(() => api.gwDisable(g.id))}
+                />
               ) : (
-                <Btn label="Enable" onClick={() => act(() => api.gwEnable(g.id))} />
-              )}
-              {onEdit && <Btn label="Edit" onClick={() => onEdit(g)} />}
+                <IconBtn label="Enable" icon="power" onClick={() => act(() => api.gwEnable(g.id))} />
+              ))}
+              {g.enabled && (g.paused ? (
+                <IconBtn
+                  label="Unpause"
+                  icon="play"
+                  onClick={() => act(() => api.gwUnpause(g.id))}
+                  title="Resume forwarding queued requests to the app"
+                />
+              ) : (
+                <IconBtn
+                  label="Pause"
+                  icon="pause"
+                  onClick={() => act(() => api.gwPause(g.id))}
+                  title="Keep accepting requests but stop forwarding them to the app — they wait in the queue until unpause"
+                />
+              ))}
+              {onEdit && <IconBtn label="Edit" icon="edit" onClick={() => onEdit(g)} />}
               {onDelete && (
-                <Btn
+                <IconBtn
                   label="Delete"
+                  icon="trash"
+                  danger
                   onClick={() => {
                     if (window.confirm(`Delete gateway ${g.name} (:${g.port})?`)) onDelete(g);
                   }}

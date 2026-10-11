@@ -24,10 +24,15 @@ class ScoringMixin:
         return 1.0
 
     def _gateway_score(self, gateway_id: str) -> dict | None:
-        """Full spec 06 §6 score for one gateway; None when the queue is empty."""
+        """Full spec 06 §6 score for one gateway; None when the queue is empty.
+
+        A paused gateway (spec 11) is never a candidate: its queued requests
+        must not trigger an app load (or a forward) until the gateway is
+        unpaused — they wait in the queue and the next tick picks them up.
+        """
         gw = self._rm.gateway(gateway_id)
         q = self._rm.queue()
-        if not gw.get("enabled", True) or q.length(gateway_id) == 0:
+        if not gw.get("enabled", True) or gw.get("paused", False) or q.length(gateway_id) == 0:
             return None
         d = self._rm.demand()
         return gateway_score(

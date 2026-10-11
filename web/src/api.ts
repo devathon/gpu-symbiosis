@@ -63,6 +63,7 @@ export interface GwView {
   request_timeout_sec: number | null;
   max_concurrent_requests: number;
   enabled: boolean;
+  paused: boolean;
   state: string;
   queue: { length: number; oldest_wait_sec: number };
   /** Per-gateway scheduler score + breakup (spec 06 §6.9); hover shows detail. */
@@ -292,6 +293,37 @@ export interface GatewayFormFields {
   enabled: boolean;
 }
 
+// -- tasks (the Tasks feature) --------------------------------------------------
+// A one-shot command the system launches when the GPU has been idle. Once it has
+// run it is frozen (ran=true, no edit) — copy it to make a new one.
+export interface TaskRow {
+  id: string;
+  name: string;
+  start_time: string; // "HH:MM"
+  end_time: string; // "HH:MM"
+  idle_time: number; // minutes the GPU must be idle
+  vram_requirement: number; // MB
+  command: string;
+  ran: boolean;
+  run_time: string | null; // ISO
+  created_at: string | null;
+}
+
+export interface TaskConfig {
+  enabled: boolean;
+  gpu_idle_threshold: number; // device GPU% below which = idle
+  cooldown_time: number; // minutes between two runs
+}
+
+export interface TaskFormFields {
+  name: string;
+  start_time: string;
+  end_time: string;
+  idle_time: number;
+  vram_requirement: number;
+  command: string;
+}
+
 // -- auth (spec 12 §3) ----------------------------------------------------------
 // Double-submit CSRF: the token travels in the X-CSRF-Token header on every
 // mutating request. It is session-scoped and re-acquired after a page reload.
@@ -398,6 +430,8 @@ export const api = {
   // -- gateway lifecycle -------------------------------------------------------
   gwEnable: (id: string) => mut("POST", `/api/gateways/${id}/enable`),
   gwDisable: (id: string) => mut("POST", `/api/gateways/${id}/disable`),
+  gwPause: (id: string) => mut("POST", `/api/gateways/${id}/pause`),
+  gwUnpause: (id: string) => mut("POST", `/api/gateways/${id}/unpause`),
   gwClear: (id: string) => mut("POST", `/api/gateways/${id}/clear-queue?confirm=true`),
   gwProcessNow: (id: string) => mut("POST", `/api/gateways/${id}/process-now`),
 
@@ -419,4 +453,12 @@ export const api = {
   gwQueueForce: (id: string, requestId: string) =>
     mut("POST", `/api/gateways/${id}/queue/${requestId}/force`),
   reqCancel: (id: string) => mut("POST", `/api/requests/${id}/cancel`),
+
+  // -- tasks (the Tasks feature) ------------------------------------------------
+  tasksConfig: () => getJson<TaskConfig>("/api/tasks/config"),
+  taskList: () => getJson<TaskRow[]>("/api/tasks"),
+  taskCreate: (fields: TaskFormFields) => mut<TaskRow>("POST", "/api/tasks", fields),
+  taskUpdate: (id: string, fields: Partial<TaskFormFields>) =>
+    mut<TaskRow>("PUT", `/api/tasks/${id}`, fields),
+  taskDelete: (id: string) => mut("DELETE", `/api/tasks/${id}`),
 };

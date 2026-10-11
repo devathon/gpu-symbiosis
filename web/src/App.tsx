@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, AppView, Decision, EventRow, GpuSample, GwView, RequestRow, Status, initAuth } from "./api";
+import { api, AppView, Decision, EventRow, GpuSample, GwView, RequestRow, Status, TaskRow, initAuth } from "./api";
 import AppCards from "./components/AppCards";
 import AppForm from "./components/AppForm";
 import GatewayCards from "./components/GatewayCards";
@@ -11,6 +11,8 @@ import RequestsTable from "./components/RequestsTable";
 import GpuChart from "./components/GpuChart";
 import MetricsPanel from "./components/MetricsPanel";
 import AuthPanel from "./components/AuthPanel";
+import TaskForm from "./components/TaskForm";
+import TaskCards from "./components/TaskCards";
 
 const MAX_SAMPLES = 180;
 const TABS = [
@@ -18,9 +20,10 @@ const TABS = [
   { id: "applications", label: "Applications" },
   { id: "gateways", label: "Gateways" },
 ] as const;
+type TabId = (typeof TABS)[number]["id"] | "tasks";
 
 export default function App() {
-  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("dashboard");
+  const [tab, setTab] = useState<TabId>("dashboard");
   const [authMode, setAuthMode] = useState<"dev" | "login" | "authed" | "checking">("checking");
   const [username, setUsername] = useState<string>("");
   const [authError, setAuthError] = useState<string | null>(null);
@@ -30,6 +33,12 @@ export default function App() {
   const [editingGw, setEditingGw] = useState<GwView | null>(null);
   const [keysGw, setKeysGw] = useState<GwView | null>(null);
   const [queueGw, setQueueGw] = useState<GwView | null>(null);
+  // The Tasks feature: only surfaced (nav + page) when tasks.enabled is true.
+  const [tasksEnabled, setTasksEnabled] = useState(false);
+  const [tasks, setTasks] = useState<TaskRow[]>([]);
+  const [showTaskForm, setShowTaskForm] = useState(false);
+  const [editingTask, setEditingTask] = useState<TaskRow | null>(null);
+  const [prefillTask, setPrefillTask] = useState<TaskRow | null>(null);
   // Dashboard-only: each section defaults to showing active items (running apps,
   // non-idle gateways); its header-row toggle expands to show everything. The
   // Applications / Gateways pages always show all items (no filtering).
@@ -50,6 +59,32 @@ export default function App() {
       .then((r) => setAuthMode(r.mode))
       .catch(() => setAuthMode("dev"));
   }, []);
+
+  // The Tasks feature is opt-in (tasks.enabled); fetch its config once to decide
+  // whether to surface the Tasks nav item + page.
+  useEffect(() => {
+    api.tasksConfig().then((c) => setTasksEnabled(c.enabled)).catch(() => setTasksEnabled(false));
+  }, []);
+
+  // Poll the task list while the feature is enabled (the Tasks page).
+  useEffect(() => {
+    if (!tasksEnabled) return;
+    let live = true;
+    const tick = async () => {
+      try {
+        const t = await api.taskList();
+        if (live) setTasks(t);
+      } catch {
+        /* non-fatal */
+      }
+    };
+    tick();
+    const h = setInterval(tick, 2000);
+    return () => {
+      live = false;
+      clearInterval(h);
+    };
+  }, [tasksEnabled]);
 
   // Status + requests + decision polling.
   useEffect(() => {
@@ -151,7 +186,10 @@ export default function App() {
           )}
         </div>
         <nav className="flex gap-1">
-          {TABS.map((t) => (
+          {[
+            ...TABS.map((t) => ({ id: t.id as TabId, label: t.label })),
+            ...(tasksEnabled ? [{ id: "tasks" as TabId, label: "Tasks" }] : []),
+          ].map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
@@ -189,14 +227,16 @@ export default function App() {
           {tab === "dashboard" && (
             <>
               {res && (
-                <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-400">
-                  <span className="font-medium text-zinc-200">{res.name || "GPU"}</span>
-                  {res.pcie && <span className="text-zinc-500">{res.pcie}</span>}
-                  <span className="tabular-nums">Rx: {fmtRate(res.rx_mbps)}</span>
-                  <span className="tabular-nums">Tx: {fmtRate(res.tx_mbps)}</span>
-                  <span>
-                    Pow: {fmtPow(res.power_w, res.power_limit_w)}
-                  </span>
+                <div className="mb-2 text-sm text-zinc-400">
+                  {/* Row 1: GPU name only. Row 2: PCIe + link stats. On narrow
+                      screens the stats wrap; the name never mixes with them. */}
+                  <div className="font-medium text-zinc-200">{res.name || "GPU"}</div>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+                    {res.pcie && <span className="text-zinc-500">{res.pcie}</span>}
+                    <span className="tabular-nums">Rx: {fmtRate(res.rx_mbps)}</span>
+                    <span className="tabular-nums">Tx: {fmtRate(res.tx_mbps)}</span>
+                    <span>Pow: {fmtPow(res.power_w, res.power_limit_w)}</span>
+                  </div>
                 </div>
               )}
 
@@ -234,7 +274,7 @@ export default function App() {
 
               <div className="mb-6 grid gap-4 lg:grid-cols-2">
                 <AppCards apps={apps} act={act} showAll={showAllApps} onToggle={setShowAllApps} />
-                <GatewayCards gws={gws} act={act} decision={decision} showAll={showAllGws} onToggle={setShowAllGws} />
+                <GatewayCards gws={gws} act={act} decision={decision} showAll={showAllGws} onToggle={setShowAllGws} showDisable={false} />
               </div>
 
               <div className="mb-6 grid gap-4 lg:grid-cols-2">
@@ -357,6 +397,57 @@ export default function App() {
                   <QueueInspector gwId={queueGw.id} act={act} />
                 </div>
               )}
+            </div>
+          )}
+
+          {tasksEnabled && tab === "tasks" && (
+            <div className="space-y-4">
+              <div className="flex justify-end">
+                <button
+                  onClick={() => {
+                    setEditingTask(null);
+                    setPrefillTask(null);
+                    setShowTaskForm(true);
+                  }}
+                  className="rounded bg-zinc-700 px-3 py-1.5 text-sm font-medium hover:bg-zinc-600"
+                >
+                  + New Task
+                </button>
+              </div>
+              {showTaskForm && (
+                <TaskForm
+                  editing={editingTask}
+                  prefill={prefillTask}
+                  onClose={() => {
+                    setShowTaskForm(false);
+                    setEditingTask(null);
+                    setPrefillTask(null);
+                  }}
+                  act={act}
+                />
+              )}
+              <TaskCards
+                tasks={tasks}
+                onEdit={(t) => {
+                  setEditingTask(t);
+                  setPrefillTask(null);
+                  setShowTaskForm(true);
+                }}
+                onCopy={(t) => {
+                  setEditingTask(null);
+                  setPrefillTask(t);
+                  setShowTaskForm(true);
+                }}
+                onDelete={(t) =>
+                  act(async () => {
+                    await api.taskDelete(t.id);
+                    if (editingTask?.id === t.id) {
+                      setEditingTask(null);
+                      setShowTaskForm(false);
+                    }
+                  })
+                }
+              />
             </div>
           )}
         </>

@@ -9,6 +9,7 @@ from gpusybio.config.models import (
     Config,
     GatewaySpec,
     SettingsSpec,
+    TasksSpec,
     load_yaml,
 )
 from gpusybio.config.seed import seed_database
@@ -18,6 +19,7 @@ __all__ = [
     "Config",
     "GatewaySpec",
     "SettingsSpec",
+    "TasksSpec",
     "load_yaml",
     "seed_database",
 ]

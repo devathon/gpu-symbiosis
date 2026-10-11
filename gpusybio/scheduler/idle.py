@@ -109,6 +109,27 @@ class IdleUnloader:
 
         return is_active(self._states.get(app_id), self._resources, self._threshold(app_id))
 
+    def unloadable_app_ids(self) -> list[str]:
+        """Apps that are *safe to unload right now*: LOADED, idle (not active),
+        and passing the auto-unload safety checks — i.e. the set that *would* be
+        auto-unloaded (ignoring each app's own idle timeout).
+
+        Used by the task scheduler to free VRAM: it asks this for candidates and
+        releases the subset whose freed memory covers a task's shortfall.
+        """
+        out: list[str] = []
+        for app_id in self._app_ids:
+            s = self._states.get(app_id)
+            if not (s.process is ProcessState.STARTED and s.residency is ResidencyState.LOADED):
+                continue
+            if s.draining:
+                continue
+            if self.is_active(app_id):
+                continue
+            if self._can_auto_unload(app_id)[0]:
+                out.append(app_id)
+        return out
+
     def last_active(self, app_id: str) -> float | None:
         """Last timestamp the app was observed active (None if never seen active)."""
         s = self._states.get(app_id)

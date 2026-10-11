@@ -25,6 +25,7 @@ IDLE_TIMEOUT = "idle_timeout"
 PROCESS_NOW = "process_now"
 PROCESS_DIED = "process_died"
 RECONCILE = "reconcile"
+TASK_RAN = "task_ran"
 
 # Coarse classes: lifecycle events route to their trigger class so the
 # scheduler can wake on e.g. LOAD_READY (class load_complete).

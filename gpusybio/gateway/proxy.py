@@ -458,7 +458,15 @@ def make_gateway_proxy(
         # request was received (queued_at). No wait-timeout policy may extend
         # past it.
         absolute_deadline = slot.queued_at + _request_timeout(gw)
-        deadline = min(time.monotonic() + max_wait, absolute_deadline)
+        if gw.get("paused", False):
+            # Paused gateway (spec 11): the request holds in the queue until the
+            # gateway is unpaused — an intentional hold, so neither the
+            # wait-timeout policy nor the received→completed cap applies while
+            # it was paused at intake. Client disconnect still cancels
+            # (Invariant 6), and the scheduler forwards it on unpause.
+            deadline = float("inf")
+        else:
+            deadline = min(time.monotonic() + max_wait, absolute_deadline)
         escalated = False
 
         while True:

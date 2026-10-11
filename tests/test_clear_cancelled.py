@@ -1,9 +1,14 @@
-"""Clear Queue must mark the cancelled request CANCELLED in the request log.
+"""Clear Queue must cancel the queued requests for real — client included.
 
-Regression: the clear-queue endpoint called the async ``_update_status``
+Regression 1: the clear-queue endpoint called the async ``_update_status``
 without ``await``-ing it, so the coroutine was dropped and the DB row never
-moved to CANCELLED — the request stayed QUEUED forever. Clearing a gateway's
-queue must persist CANCELLED for every queued request it releases.
+moved to CANCELLED — the request stayed QUEUED forever.
+
+Regression 2: the endpoint popped the per-request forward event without
+``set()``-ing it, so the parked client was never woken. It sat until its own
+wait-timeout fired, then received 503 "wait timeout" and the log status was
+overwritten CANCELLED → EXPIRED. Clearing must wake each parked client, which
+then receives 409 "request cancelled" promptly and the row stays CANCELLED.
 """
 
 from __future__ import annotations
@@ -53,16 +58,22 @@ async def test_clear_marks_request_cancelled(server):
         assert r.status_code == 200
         assert r.json()["cancelled"] >= 1
 
-        # The queued request is now CANCELLED in the request log.
-        await _wait(lambda: _has(c, "CANCELLED", "gw-a1"), timeout=10)
+        # The cleared client is woken immediately (not left until its own
+        # wait-timeout) and receives 409 "request cancelled" — not 503.
+        resp = await asyncio.wait_for(queued_task, timeout=10)
+        assert resp.status_code == 409
+        assert "cancelled" in resp.text.lower()
 
-        # The cleared request's client call resolves (never hangs).
-        queued_task.cancel()
+        # The log stays CANCELLED (not overwritten to EXPIRED by the client's
+        # own timeout path) with the clear's reason.
+        row = next(x for x in (await c.get(f"{ADMIN}/api/requests?gateway_id=gw-a1")).json()
+                   if x["status"] == "CANCELLED")
+        assert row["error"] == "queue cleared"
+
         long_task.cancel()
-        for t in (queued_task, long_task):
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+        try:
+            await long_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
     finally:
         await c.aclose()

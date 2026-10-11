@@ -95,10 +95,10 @@ function AppMetricsCard({
     <div className="rounded border border-zinc-800 bg-zinc-950/40 p-3">
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-2 text-sm">
-          <span className="truncate font-medium text-zinc-200">{app.name}</span>
-          {m.type && (
-            <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">{m.type}</span>
-          )}
+          <span className="truncate font-medium text-zinc-200">
+            {app.name}
+            {m.type && <span className="font-normal text-zinc-500"> ({m.type})</span>}
+          </span>
         </span>
         <span className="flex shrink-0 items-center gap-1.5 text-xs">
           {badge(appDisplayState(state.process_state, state.active))}
