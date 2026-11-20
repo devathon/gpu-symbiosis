@@ -85,8 +85,10 @@ YAML/TOML is the **seed/import** format only. Seeding semantics:
 - **Applications & gateways** — the seed **creates missing rows only**. An
   existing DB row is updated at startup **only if its spec sets `update: true`**
   (default `false`); otherwise the row is left untouched, so runtime changes
-  made via `PUT /api/*` survive a restart. The seed never deletes rows absent
-  from the document.
+  made via `PUT /api/*` survive a restart. When the flag is set, the seed writes
+  **only the fields the document declares** (`model_fields_set`): a field the
+  document omits keeps its stored value, so a model default must not overwrite a
+  runtime change. The seed never deletes rows absent from the document.
 - **Settings** — the seed **always overwrites** (`SETTING_KEYS` upserted
   unconditionally). There is no settings API, so the YAML is the only way to
   change settings.

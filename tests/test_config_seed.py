@@ -1,7 +1,8 @@
 """Seed semantics (spec 16 §2.6): the seed creates missing application/gateway
 rows only; an existing row is updated at startup only when its spec sets
-``update: true``. Settings always overwrite (no settings API exists). The seed
-never deletes rows absent from the document.
+``update: true``, and then only for the fields the document declares. Settings
+always overwrite (no settings API exists). The seed never deletes rows absent
+from the document.
 """
 
 from __future__ import annotations
@@ -39,9 +40,9 @@ def _app_spec(update: bool = False, **overrides) -> ApplicationSpec:
     return ApplicationSpec(**fields)
 
 
-def _config(update: bool = False) -> Config:
+def _config(update: bool = False, **app_overrides) -> Config:
     return Config(
-        applications=[_app_spec(update=update)],
+        applications=[_app_spec(update=update, **app_overrides)],
         gateways=[
             GatewaySpec(id="gw-a1", name="gw-a1", port=9511, application_id="a1", update=update)
         ],
@@ -168,14 +169,45 @@ def test_seed_updates_existing_app_with_update_true(tmp_path):
         a.name = "renamed-via-api"
         a.port = 9601
         a.max_concurrent_requests = 8
-    # Re-seed with update: true — the spec wins.
+    # Re-seed with update: true — the declared fields win, the undeclared
+    # default does not overwrite the runtime change.
     seed_database(db, _config(update=True))
 
     with db() as s:
         a = s.get(Application, "a1")
+    assert a.name == "qwen38"  # declared in the document
+    assert a.port == 9501  # declared in the document
+    assert a.max_concurrent_requests == 8  # spec default — not declared, kept
+
+
+def test_seed_update_true_keeps_fields_absent_from_the_document(tmp_path):
+    """Regression: a field the YAML does not declare must not be overwritten by
+    the model default on re-seed. `update: true` re-applies the document, and the
+    document only carries what it declares — otherwise a runtime change (e.g.
+    `allow_automatic_unload` toggled in the UI) is lost on the next restart
+    (spec 16 §2.6)."""
+    db = _db(tmp_path)
+    seed_database(db, _config(update=True))
+
+    # Runtime change on a field the seed document never mentions.
+    with db() as s:
+        a = s.get(Application, "a1")
+        a.allow_automatic_unload = False
+        a.pinned = True
+    seed_database(db, _config(update=True))
+
+    with db() as s:
+        a = s.get(Application, "a1")
+    assert a.allow_automatic_unload is False
+    assert a.pinned is True
+    # Declared fields still win.
     assert a.name == "qwen38"
-    assert a.port == 9501
-    assert a.max_concurrent_requests == 1
+
+    # A field declared in the document is applied on re-seed.
+    seed_database(db, _config(update=True, allow_automatic_unload=True))
+    with db() as s:
+        a = s.get(Application, "a1")
+    assert a.allow_automatic_unload is True
 
 
 def test_seed_skips_existing_gateway_by_default(tmp_path):
@@ -206,8 +238,57 @@ def test_seed_updates_existing_gateway_with_update_true(tmp_path):
 
     with db() as s:
         g = s.get(Gateway, "gw-a1")
+    assert g.name == "gw-a1"  # declared in the document
+    assert g.priority == 99  # spec default — not declared, kept
+
+
+def test_seed_gateway_update_true_keeps_undeclared_fields(tmp_path):
+    """Same rule as the application side: a field absent from the document keeps
+    its stored value (spec 16 §2.6)."""
+    db = _db(tmp_path)
+    seed_database(db, _config(update=True))
+
+    with db() as s:
+        g = s.get(Gateway, "gw-a1")
+        g.paused = True
+    seed_database(db, _config(update=True))
+
+    with db() as s:
+        g = s.get(Gateway, "gw-a1")
+    assert g.paused is True
     assert g.name == "gw-a1"
-    assert g.priority == 5  # GatewaySpec default
+
+
+def test_field_map_is_derived_from_the_model():
+    """The seed must not hold a private copy of the spec→column translation. It is
+    read from the model (spec 09), so the two cannot desynchronize when a field is
+    added under a different name — the link lives on the column (`info`), next to the
+    schema it describes."""
+    from gpusybio.config.seed import _APP_FIELD_MAP, _GATEWAY_FIELD_MAP, _SKIP_FIELDS
+
+    for field in ApplicationSpec.model_fields:
+        if field in _SKIP_FIELDS:
+            continue
+        column = _APP_FIELD_MAP.get(field)
+        assert column is not None, f"spec field {field} has no column"
+        assert column in Application.__table__.columns
+    for field in GatewaySpec.model_fields:
+        if field in _SKIP_FIELDS:
+            continue
+        assert field in _GATEWAY_FIELD_MAP, f"spec field {field} has no column"
+
+    # The four columns whose name differs from the YAML key keep the link on the model.
+    assert _APP_FIELD_MAP["gpu_memory_mb"] == "configured_gpu_memory_mb"
+    assert Application.__table__.columns["configured_gpu_memory_mb"].info["spec_field"] == "gpu_memory_mb"
+
+    # Runtime columns are never spec fields, so the seed can never write them.
+    runtime_only = [
+        "observed_max_gpu_memory_mb", "observed_max_gpu_usage_pct", "startup_time_sec",
+        "load_time_sec", "unload_time_sec", "stop_time_sec", "consecutive_load_failures",
+        "faulted_until", "supports_load_unload", "created_at", "updated_at",
+    ]
+    assert not set(runtime_only) & set(ApplicationSpec.model_fields)
+    assert "paused" not in GatewaySpec.model_fields
 
 
 def test_settings_always_overwrite(tmp_path):

@@ -50,12 +50,24 @@ class Application(Base):
 
     application_type: Mapped[str] = mapped_column(Text, default="custom")
 
-    configured_gpu_memory_mb: Mapped[int] = mapped_column(Integer)
+    # The schema stores a configured/observed pair (spec 09), while the config model
+    # exposes only the declared half under the short YAML key (spec 10 §6). `info` is
+    # the single place that records the link, so the seed derives it from the model
+    # instead of keeping its own copy (spec 16 §2.6).
+    configured_gpu_memory_mb: Mapped[int] = mapped_column(
+        Integer, info={"spec_field": "gpu_memory_mb"}
+    )
     observed_max_gpu_memory_mb: Mapped[int | None] = mapped_column(Integer)
-    configured_gpu_usage_pct: Mapped[float | None] = mapped_column(Float)
+    configured_gpu_usage_pct: Mapped[float | None] = mapped_column(
+        Float, info={"spec_field": "gpu_usage_pct"}
+    )
     observed_max_gpu_usage_pct: Mapped[float | None] = mapped_column(Float)
-    cpu_memory_required_mb: Mapped[int | None] = mapped_column(Integer)
-    cpu_usage_expected_pct: Mapped[float | None] = mapped_column(Float)
+    cpu_memory_required_mb: Mapped[int | None] = mapped_column(
+        Integer, info={"spec_field": "cpu_memory_mb"}
+    )
+    cpu_usage_expected_pct: Mapped[float | None] = mapped_column(
+        Float, info={"spec_field": "cpu_usage_pct"}
+    )
     gpu_memory_safety_margin: Mapped[float] = mapped_column(Float, default=0.10)
 
     startup_time_sec: Mapped[float | None] = mapped_column(Float)

@@ -406,10 +406,13 @@ app log at `<data_path>/logs/<id>.log` is the app's stdout; the pid at
 
 **Seed semantics (spec 16 §2.6).** `config.yaml` is a seed: on startup it
 **creates missing application/gateway rows only**. An existing DB row is
-updated only if that spec sets `update: true`; without the flag, changes made
-through the API/UI survive a restart. The seed never deletes rows. Settings are
-different — the seed always overwrites them (there is no settings API, so the
-YAML is the only way to change a setting).
+updated only if that spec sets `update: true`, and then only for the fields the
+document actually declares — a field omitted from the YAML keeps the value the DB
+holds, so a runtime change made through the API/UI is not silently reset by the
+spec default. Without the flag, changes made through the API/UI survive a
+restart. The seed never deletes rows. Settings are different — the seed always
+overwrites them (there is no settings API, so the YAML is the only way to change
+a setting).
 
 ### Tests
 
