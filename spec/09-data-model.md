@@ -79,6 +79,12 @@ created_at                TIMESTAMP
 updated_at                TIMESTAMP
 ```
 
+The `configured_*` columns pair with their `observed_max_*` counterpart, so their names
+differ from the config field that feeds them ([03 §5](03-application-model.md#5-resource-requirements),
+[10 §5](10-api.md#5-example-configurations)). The link between the config field name and the
+column is declared on the column itself (`info={"spec_field": …}`) and the seed derives the
+translation from the model, so it has no private copy that can go stale (16 §2.6).
+
 ## 3. Gateways Table
 
 ```text

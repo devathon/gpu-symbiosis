@@ -33,6 +33,22 @@ SETTING_KEYS = {
 }
 
 
+def _field_map(model) -> dict[str, str]:
+    """Spec field name -> DB column name, read from the model (spec 09). A column
+    whose name differs carries ``info={"spec_field": ...}`` in the model; every other
+    column maps to itself. Derived here so the seed has no private copy that can go
+    stale when a field is added under a different name.
+    """
+    return {c.info.get("spec_field", c.name): c.name for c in model.__table__.columns}
+
+
+_APP_FIELD_MAP = _field_map(Application)
+_GATEWAY_FIELD_MAP = _field_map(Gateway)
+# Model fields stored as JSON documents in the DB. `metrics` is the same kind of
+# column but its items are model objects, so it serializes through model_dump().
+_JSON_FIELDS = {"command_env"}
+
+
 def seed_database(factory: SessionFactory, config: Config) -> None:
     """Seed applications, gateways, and settings from the seed document.
 
@@ -40,7 +56,10 @@ def seed_database(factory: SessionFactory, config: Config) -> None:
     the seed creates missing rows only. An existing application/gateway row is
     updated at startup ONLY if its spec sets ``update: true``; otherwise the
     row is left untouched so runtime changes (via ``PUT /api/*``) survive a
-    restart. The seed never deletes rows absent from the document. Settings
+    restart. When the flag is set, only the fields the document declares are
+    written — a field omitted from the YAML keeps the value stored in the DB,
+    otherwise the model default would silently overwrite the runtime change.
+    The seed never deletes rows absent from the document. Settings
     always overwrite (there is no settings API — YAML is the only way to
     change them). Existing rows keep their runtime-mutated fields (timing,
     observed memory, failure counts).
@@ -51,9 +70,10 @@ def seed_database(factory: SessionFactory, config: Config) -> None:
             if row is None:
                 row = Application(id=spec.id)
                 s.add(row)
-            elif not spec.update:
-                continue  # existing row, no update flag — leave untouched
-            _apply_app_config(row, spec)
+                _apply_app_config(row, spec, fresh=True)
+            elif spec.update:
+                _apply_app_config(row, spec)
+            # existing row, no update flag — leave untouched
 
         for spec in config.gateways:
             gid = spec.id or f"gw-{spec.application_id}"
@@ -61,9 +81,10 @@ def seed_database(factory: SessionFactory, config: Config) -> None:
             if row is None:
                 row = Gateway(id=gid)
                 s.add(row)
-            elif not spec.update:
-                continue  # existing row, no update flag — leave untouched
-            _apply_gateway_config(row, spec, gid)
+                _apply_gateway_config(row, spec, gid, fresh=True)
+            elif spec.update:
+                _apply_gateway_config(row, spec, gid)
+            # existing row, no update flag — leave untouched
 
         for key, getter in SETTING_KEYS.items():
             value = getter(config)
@@ -76,64 +97,43 @@ def seed_database(factory: SessionFactory, config: Config) -> None:
             row.value = json.dumps(value)
 
 
-def _apply_app_config(row: Application, spec) -> None:
-    row.name = spec.name
-    row.description = spec.description
-    row.process_name = spec.process_name
-    row.start_script = spec.start_script
-    row.stop_script = spec.stop_script
-    row.load_script = spec.load_script
-    row.unload_script = spec.unload_script
-    row.log_file = spec.log_file
-    row.pid_file = spec.pid_file
-    row.port = spec.port
-    row.protocol = spec.protocol
-    row.health_check_url = spec.health_check_url
-    row.health_check_method = spec.health_check_method
-    row.health_check_timeout = spec.health_check_timeout
-    row.ready_check_url = spec.ready_check_url
-    row.application_type = spec.application_type
-    row.configured_gpu_memory_mb = spec.gpu_memory_mb
-    row.configured_gpu_usage_pct = spec.gpu_usage_pct
-    row.cpu_memory_required_mb = spec.cpu_memory_mb
-    row.cpu_usage_expected_pct = spec.cpu_usage_pct
-    row.gpu_memory_safety_margin = spec.gpu_memory_safety_margin
+# Model fields that are seed control or row identity, not persisted columns.
+_SKIP_FIELDS = {"id", "update"}
+
+
+def _declared(spec, fresh: bool) -> set[str]:
+    """Fields to write: the ones the YAML declares, or all of them for a row
+    that is being created (its defaults are the intended initial values)."""
+    fields = set(spec.model_fields) if fresh else spec.model_fields_set
+    return fields - _SKIP_FIELDS
+
+
+def _apply_app_config(row: Application, spec, fresh: bool = False) -> None:
+    for name in _declared(spec, fresh):
+        column = _APP_FIELD_MAP.get(name)
+        if column is None:
+            continue  # seed control or a column the seed must never write
+        value = getattr(spec, name)
+        if name == "metrics":
+            value = json.dumps([m.model_dump() for m in value]) if value else None
+        elif name in _JSON_FIELDS:
+            value = json.dumps(value) if value else None
+        setattr(row, column, value)
+
     # Derived: the app can be *unloaded* (freed while the process stays up) iff
     # it has an unload script. A load script is optional — if absent, an
     # unloaded app resumes serving without a load step.
-    row.supports_load_unload = bool(spec.unload_script)
-    row.allow_automatic_unload = spec.allow_automatic_unload
-    row.idle_unload_timeout_sec = spec.idle_unload_timeout_sec
-    row.activity_detection_method = spec.activity_detection_method
-    row.idle_threshold_gpu_pct = spec.idle_threshold_gpu_pct
-    row.loaded_gpu_memory_mb = spec.loaded_gpu_memory_mb
-    row.pinned = spec.pinned
-    row.api_enabled = spec.api_enabled
-    row.supports_queueing = spec.supports_queueing
-    row.max_concurrent_requests = spec.max_concurrent_requests
-    row.metrics = (
-        json.dumps([m.model_dump() for m in spec.metrics]) if spec.metrics else None
-    )
-    row.command_cwd = spec.command_cwd
-    row.command_env = json.dumps(spec.command_env) if spec.command_env else None
-    row.command_response_mode = spec.command_response_mode
-    row.command_timeout_sec = spec.command_timeout_sec
-    row.enabled = spec.enabled
+    row.supports_load_unload = bool(row.unload_script)
     if row.observed_max_gpu_memory_mb is None:
         row.observed_max_gpu_memory_mb = spec.gpu_memory_mb
     if row.observed_max_gpu_usage_pct is None:
         row.observed_max_gpu_usage_pct = spec.gpu_usage_pct
 
 
-def _apply_gateway_config(row: Gateway, spec, gid: str) -> None:
+def _apply_gateway_config(row: Gateway, spec, gid: str, fresh: bool = False) -> None:
     row.id = gid
-    row.name = spec.name
-    row.port = spec.port
-    row.application_id = spec.application_id
-    row.priority = spec.priority
-    row.max_waiting_queue = spec.max_waiting_queue
-    row.max_waiting_time_sec = spec.max_waiting_time_sec
-    row.wait_timeout_policy = spec.wait_timeout_policy
-    row.request_timeout_sec = spec.request_timeout_sec
-    row.max_concurrent_requests = spec.max_concurrent_requests
-    row.enabled = spec.enabled
+    for name in _declared(spec, fresh):
+        column = _GATEWAY_FIELD_MAP.get(name)
+        if column is None:
+            continue
+        setattr(row, column, getattr(spec, name))
